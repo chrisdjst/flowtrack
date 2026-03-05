@@ -9,7 +9,7 @@ echo "=== FlowTrack Setup ==="
 echo ""
 
 # 1. Check/install uv
-echo "[1/5] Checking uv..."
+echo "[1/6] Checking uv..."
 if command -v uv &> /dev/null; then
     echo "  uv found: $(uv --version)"
 else
@@ -24,17 +24,28 @@ else
 fi
 
 # 2. Install Python
-echo "[2/5] Checking Python..."
+echo "[2/6] Checking Python..."
 uv python install 3.13
 echo "  Python 3.13 ready."
 
 # 3. Install dependencies
-echo "[3/5] Installing dependencies..."
+echo "[3/6] Installing dependencies..."
 uv sync --group dev
 echo "  Dependencies installed."
 
-# 4. Create .env if it doesn't exist
-echo "[4/5] Checking .env..."
+# 4. Install flowtrack command globally
+echo "[4/6] Installing flowtrack command..."
+uv tool install -e . --force 2>/dev/null || true
+if command -v flowtrack &> /dev/null; then
+    echo "  'flowtrack' command available globally."
+else
+    echo "  Installed, but not in PATH yet."
+    echo "  Run: export PATH=\"\$HOME/.local/bin:\$PATH\""
+    echo "  Or use 'uv run flowtrack' instead."
+fi
+
+# 5. Create .env if it doesn't exist
+echo "[5/6] Checking .env..."
 if [ ! -f ".env" ]; then
     cp .env.example .env
     echo "  .env created from .env.example"
@@ -46,8 +57,8 @@ fi
 DB_PORT=$(grep -E "^FLOWTRACK_DB_PORT=" .env 2>/dev/null | cut -d= -f2 || echo "5433")
 DB_PORT=${DB_PORT:-5433}
 
-# 5. Database setup
-echo "[5/5] Database setup..."
+# 6. Database setup
+echo "[6/6] Database setup..."
 
 if ! command -v docker &> /dev/null; then
     echo "  Docker not found."
@@ -125,7 +136,7 @@ echo ""
 echo "=== Setup complete ==="
 echo ""
 echo "Quick start:"
-echo "  uv run flowtrack --help        # Show all commands"
-echo "  uv run flowtrack dev start     # Start a dev session"
-echo "  uv run flowtrack status        # Show current status"
+echo "  flowtrack --help        # Show all commands"
+echo "  flowtrack dev start     # Start a dev session"
+echo "  flowtrack status        # Show current status"
 echo ""

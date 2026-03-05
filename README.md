@@ -21,7 +21,7 @@ CLI para captura de métricas de produtividade baseada nos frameworks **SPACE** 
 
 ### Setup automatizado
 
-O script instala o uv, Python, dependências, cria o `.env` e sobe o banco de dados com Docker.
+O script instala o uv, Python, dependências, registra o comando `flowtrack` globalmente, cria o `.env` e sobe o banco de dados com Docker.
 
 **Windows (PowerShell):**
 
@@ -42,7 +42,7 @@ bash scripts/setup.sh
 Após o setup, edite o `.env` com suas credenciais e pronto:
 
 ```bash
-uv run flowtrack --help
+flowtrack --help
 ```
 
 ### Setup com Docker Compose (somente banco)
@@ -52,6 +52,7 @@ Se preferir gerenciar apenas o PostgreSQL via Docker:
 ```bash
 docker compose up -d db        # Sobe o PostgreSQL na porta 5433
 uv sync                        # Instala dependências
+uv tool install -e .           # Instala o comando flowtrack globalmente
 uv run alembic upgrade head    # Roda migrações
 ```
 
@@ -86,10 +87,16 @@ uv sync
 # Instale as dependências de desenvolvimento
 uv sync --group dev
 
+# Instale o comando flowtrack globalmente
+uv tool install -e .
+
 # Copie e edite o .env
 cp .env.example .env   # Linux/macOS
 copy .env.example .env # Windows
 ```
+
+> **Nota:** Após `uv tool install -e .`, o comando `flowtrack` fica disponível globalmente no terminal.
+> Se preferir não instalar globalmente, use `uv run flowtrack` em vez de `flowtrack` em todos os comandos abaixo.
 
 ### Banco de dados
 
@@ -109,7 +116,8 @@ createdb flowtrack
 Depois rode as migrações:
 
 ```bash
-uv run alembic upgrade head
+flowtrack db upgrade
+# ou: uv run alembic upgrade head
 ```
 
 ## Configuração
@@ -137,8 +145,8 @@ FLOWTRACK_DATABASE_URL=postgresql://flowtrack:flowtrack@localhost:5433/flowtrack
 ### Configuração interativa
 
 ```bash
-uv run flowtrack config          # Configura credenciais
-uv run flowtrack config --show   # Exibe configuração atual
+flowtrack config          # Configura credenciais
+flowtrack config --show   # Exibe configuração atual
 ```
 
 ## Uso
@@ -147,65 +155,65 @@ uv run flowtrack config --show   # Exibe configuração atual
 
 ```bash
 # Iniciar sessão (opcionalmente vinculando ticket/PR)
-uv run flowtrack dev start
-uv run flowtrack dev start --ticket PROJ-123 --pr 42
+flowtrack dev start
+flowtrack dev start --ticket PROJ-123 --pr 42
 
 # Pausar / retomar
-uv run flowtrack dev pause
-uv run flowtrack dev resume
+flowtrack dev pause
+flowtrack dev resume
 
 # Encerrar sessão
-uv run flowtrack dev end
-uv run flowtrack dev end --no-sync  # sem sincronizar
+flowtrack dev end
+flowtrack dev end --no-sync  # sem sincronizar
 ```
 
 ### Code review
 
 ```bash
-uv run flowtrack review start --pr 42
-uv run flowtrack review end
+flowtrack review start --pr 42
+flowtrack review end
 ```
 
 ### Testes
 
 ```bash
-uv run flowtrack test start --ticket PROJ-123
-uv run flowtrack test end
+flowtrack test start --ticket PROJ-123
+flowtrack test end
 ```
 
 ### Bloqueios
 
 ```bash
-uv run flowtrack block start --reason "Aguardando aprovação"
-uv run flowtrack block end
+flowtrack block start --reason "Aguardando aprovação"
+flowtrack block end
 ```
 
 ### Interrupções
 
 ```bash
-uv run flowtrack interrupt start --type meeting
-uv run flowtrack interrupt start --type slack
-uv run flowtrack interrupt end
+flowtrack interrupt start --type meeting
+flowtrack interrupt start --type slack
+flowtrack interrupt end
 ```
 
 ### Deployments
 
 ```bash
-uv run flowtrack deploy --env production
-uv run flowtrack deploy --env staging
+flowtrack deploy --env production
+flowtrack deploy --env staging
 ```
 
 ### Incidentes
 
 ```bash
-uv run flowtrack incident start --description "API fora do ar"
-uv run flowtrack incident end
+flowtrack incident start --description "API fora do ar"
+flowtrack incident end
 ```
 
 ### Status
 
 ```bash
-uv run flowtrack status
+flowtrack status
 ```
 
 Exibe um painel com a sessão ativa, tempo decorrido, bloqueios e interrupções.
@@ -213,7 +221,7 @@ Exibe um painel com a sessão ativa, tempo decorrido, bloqueios e interrupções
 ### Sync manual
 
 ```bash
-uv run flowtrack sync
+flowtrack sync
 ```
 
 Sincroniza dados da sessão ativa com GitHub e Jira.
@@ -221,10 +229,10 @@ Sincroniza dados da sessão ativa com GitHub e Jira.
 ### Relatórios
 
 ```bash
-uv run flowtrack report
-uv run flowtrack report --period week
-uv run flowtrack report --period month
-uv run flowtrack report --period sprint
+flowtrack report
+flowtrack report --period week
+flowtrack report --period month
+flowtrack report --period sprint
 ```
 
 Gera tabelas com as métricas SPACE e DORA para o período selecionado.
@@ -232,10 +240,7 @@ Gera tabelas com as métricas SPACE e DORA para o período selecionado.
 ## Testes
 
 ```bash
-# Rodar todos os testes
 uv run pytest
-
-# Com cobertura
 uv run pytest --cov=flowtrack
 ```
 

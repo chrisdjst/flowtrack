@@ -8,7 +8,7 @@ Write-Host "=== FlowTrack Setup ===" -ForegroundColor Cyan
 Write-Host ""
 
 # 1. Check/install uv
-Write-Host "[1/5] Checking uv..." -ForegroundColor Yellow
+Write-Host "[1/6] Checking uv..." -ForegroundColor Yellow
 if (Get-Command uv -ErrorAction SilentlyContinue) {
     $uvVersion = uv --version
     Write-Host "  uv found: $uvVersion" -ForegroundColor Green
@@ -24,17 +24,27 @@ if (Get-Command uv -ErrorAction SilentlyContinue) {
 }
 
 # 2. Install Python
-Write-Host "[2/5] Checking Python..." -ForegroundColor Yellow
+Write-Host "[2/6] Checking Python..." -ForegroundColor Yellow
 uv python install 3.13
 Write-Host "  Python 3.13 ready." -ForegroundColor Green
 
 # 3. Install dependencies
-Write-Host "[3/5] Installing dependencies..." -ForegroundColor Yellow
+Write-Host "[3/6] Installing dependencies..." -ForegroundColor Yellow
 uv sync --group dev
 Write-Host "  Dependencies installed." -ForegroundColor Green
 
-# 4. Create .env if it doesn't exist
-Write-Host "[4/5] Checking .env..." -ForegroundColor Yellow
+# 4. Install flowtrack command globally
+Write-Host "[4/6] Installing flowtrack command..." -ForegroundColor Yellow
+uv tool install -e . --force 2>$null
+if (Get-Command flowtrack -ErrorAction SilentlyContinue) {
+    Write-Host "  'flowtrack' command available globally." -ForegroundColor Green
+} else {
+    Write-Host "  Installed, but not in PATH yet." -ForegroundColor Yellow
+    Write-Host "  Add uv tool bin dir to PATH, or use 'uv run flowtrack' instead." -ForegroundColor Yellow
+}
+
+# 5. Create .env if it doesn't exist
+Write-Host "[5/6] Checking .env..." -ForegroundColor Yellow
 if (-Not (Test-Path ".env")) {
     Copy-Item ".env.example" ".env"
     Write-Host "  .env created from .env.example" -ForegroundColor Green
@@ -51,8 +61,8 @@ foreach ($line in $envContent) {
     }
 }
 
-# 5. Database setup
-Write-Host "[5/5] Database setup..." -ForegroundColor Yellow
+# 6. Database setup
+Write-Host "[6/6] Database setup..." -ForegroundColor Yellow
 
 if (-Not (Get-Command docker -ErrorAction SilentlyContinue)) {
     Write-Host "  Docker not found." -ForegroundColor Red
@@ -133,7 +143,7 @@ Write-Host ""
 Write-Host "=== Setup complete ===" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Quick start:" -ForegroundColor White
-Write-Host "  uv run flowtrack --help        # Show all commands" -ForegroundColor Gray
-Write-Host "  uv run flowtrack dev start     # Start a dev session" -ForegroundColor Gray
-Write-Host "  uv run flowtrack status        # Show current status" -ForegroundColor Gray
+Write-Host "  flowtrack --help        # Show all commands" -ForegroundColor Gray
+Write-Host "  flowtrack dev start     # Start a dev session" -ForegroundColor Gray
+Write-Host "  flowtrack status        # Show current status" -ForegroundColor Gray
 Write-Host ""
