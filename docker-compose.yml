@@ -1,12 +1,13 @@
 services:
   db:
     image: postgres:16-alpine
+    container_name: flowtrack-db
     environment:
       POSTGRES_DB: flowtrack
       POSTGRES_USER: flowtrack
       POSTGRES_PASSWORD: flowtrack
     ports:
-      - "5432:5432"
+      - "${FLOWTRACK_DB_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:

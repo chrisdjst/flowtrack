@@ -16,8 +16,11 @@ if (Get-Command uv -ErrorAction SilentlyContinue) {
     Write-Host "  Installing uv..." -ForegroundColor Yellow
     powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
     $env:PATH = "$env:USERPROFILE\.local\bin;$env:PATH"
+    if (-Not (Get-Command uv -ErrorAction SilentlyContinue)) {
+        Write-Host "  uv installed but not in PATH. Restart your terminal and re-run this script." -ForegroundColor Red
+        exit 1
+    }
     Write-Host "  uv installed." -ForegroundColor Green
-    Write-Host "  NOTE: Restart your terminal or add ~/.local/bin to PATH if 'uv' is not found." -ForegroundColor Yellow
 }
 
 # 2. Install Python
@@ -35,34 +38,96 @@ Write-Host "[4/5] Checking .env..." -ForegroundColor Yellow
 if (-Not (Test-Path ".env")) {
     Copy-Item ".env.example" ".env"
     Write-Host "  .env created from .env.example" -ForegroundColor Green
-    Write-Host "  Edit .env with your credentials before running." -ForegroundColor Yellow
 } else {
     Write-Host "  .env already exists, skipping." -ForegroundColor Green
 }
 
+# Load DB port from .env
+$dbPort = 5433
+$envContent = Get-Content ".env" -ErrorAction SilentlyContinue
+foreach ($line in $envContent) {
+    if ($line -match "^FLOWTRACK_DB_PORT=(\d+)") {
+        $dbPort = $Matches[1]
+    }
+}
+
 # 5. Database setup
 Write-Host "[5/5] Database setup..." -ForegroundColor Yellow
-if (Get-Command docker -ErrorAction SilentlyContinue) {
-    $running = docker ps --filter "name=flowtrack-db" --format "{{.Names}}" 2>$null
-    if ($running -eq "flowtrack-db") {
-        Write-Host "  PostgreSQL container already running." -ForegroundColor Green
-    } else {
-        Write-Host "  Starting PostgreSQL with Docker..." -ForegroundColor Yellow
-        docker compose up -d db
-        Write-Host "  Waiting for database to be ready..." -ForegroundColor Yellow
-        Start-Sleep -Seconds 5
-        Write-Host "  PostgreSQL running on localhost:5432" -ForegroundColor Green
+
+if (-Not (Get-Command docker -ErrorAction SilentlyContinue)) {
+    Write-Host "  Docker not found." -ForegroundColor Red
+    Write-Host "  Install Docker Desktop: https://docs.docker.com/desktop/install/windows-install/" -ForegroundColor Yellow
+    Write-Host "  Then re-run this script." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  Or set up PostgreSQL manually:" -ForegroundColor Yellow
+    Write-Host "    1. Create database: CREATE DATABASE flowtrack;" -ForegroundColor Gray
+    Write-Host "    2. Update FLOWTRACK_DATABASE_URL in .env" -ForegroundColor Gray
+    Write-Host "    3. Run: uv run alembic upgrade head" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "=== Setup incomplete (database pending) ===" -ForegroundColor Yellow
+    exit 0
+}
+
+$running = docker ps --filter "name=flowtrack-db" --format "{{.Names}}" 2>$null
+if ($running -eq "flowtrack-db") {
+    Write-Host "  PostgreSQL container already running on port $dbPort." -ForegroundColor Green
+} else {
+    # Check if port is available
+    $portInUse = $false
+    try {
+        $conn = New-Object System.Net.Sockets.TcpClient
+        $conn.Connect("localhost", $dbPort)
+        $conn.Close()
+        $portInUse = $true
+    } catch {
+        $portInUse = $false
     }
 
-    Write-Host "  Running migrations..." -ForegroundColor Yellow
-    uv run alembic upgrade head
-    Write-Host "  Migrations applied." -ForegroundColor Green
-} else {
-    Write-Host "  Docker not found. Options:" -ForegroundColor Yellow
-    Write-Host "    a) Install Docker Desktop and re-run this script" -ForegroundColor Yellow
-    Write-Host "    b) Install PostgreSQL manually, create 'flowtrack' database, then run:" -ForegroundColor Yellow
-    Write-Host "       uv run alembic upgrade head" -ForegroundColor Yellow
+    if ($portInUse) {
+        Write-Host "  Port $dbPort is already in use." -ForegroundColor Red
+        Write-Host "  Options:" -ForegroundColor Yellow
+        Write-Host "    a) Change FLOWTRACK_DB_PORT in .env to a free port and re-run" -ForegroundColor Gray
+        Write-Host "    b) Stop the service using port $dbPort" -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "=== Setup incomplete (port conflict) ===" -ForegroundColor Yellow
+        exit 1
+    }
+
+    Write-Host "  Starting PostgreSQL on port $dbPort..." -ForegroundColor Yellow
+    docker compose up -d db
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  Failed to start PostgreSQL container." -ForegroundColor Red
+        exit 1
+    }
+
+    Write-Host "  Waiting for database to be ready..." -ForegroundColor Yellow
+    $retries = 0
+    $maxRetries = 15
+    while ($retries -lt $maxRetries) {
+        $health = docker inspect --format "{{.State.Health.Status}}" flowtrack-db 2>$null
+        if ($health -eq "healthy") {
+            break
+        }
+        Start-Sleep -Seconds 2
+        $retries++
+    }
+
+    if ($retries -eq $maxRetries) {
+        Write-Host "  Database did not become ready in time." -ForegroundColor Red
+        Write-Host "  Check: docker logs flowtrack-db" -ForegroundColor Yellow
+        exit 1
+    }
+
+    Write-Host "  PostgreSQL running on localhost:$dbPort" -ForegroundColor Green
 }
+
+Write-Host "  Running migrations..." -ForegroundColor Yellow
+uv run alembic upgrade head
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  Migration failed. Check your FLOWTRACK_DATABASE_URL in .env" -ForegroundColor Red
+    exit 1
+}
+Write-Host "  Migrations applied." -ForegroundColor Green
 
 Write-Host ""
 Write-Host "=== Setup complete ===" -ForegroundColor Cyan

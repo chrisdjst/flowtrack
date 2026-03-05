@@ -50,10 +50,13 @@ uv run flowtrack --help
 Se preferir gerenciar apenas o PostgreSQL via Docker:
 
 ```bash
-docker compose up -d db        # Sobe o PostgreSQL
+docker compose up -d db        # Sobe o PostgreSQL na porta 5433
 uv sync                        # Instala dependências
 uv run alembic upgrade head    # Roda migrações
 ```
+
+> O Docker mapeia a porta **5433** por padrão para evitar conflitos com PostgreSQL local.
+> Para alterar, edite `FLOWTRACK_DB_PORT` no `.env` antes de subir o container.
 
 ## Instalação manual
 
@@ -115,7 +118,8 @@ uv run alembic upgrade head
 
 | Variável | Descrição |
 |---|---|
-| `FLOWTRACK_DATABASE_URL` | URL de conexão PostgreSQL (padrão: `postgresql://localhost:5432/flowtrack`) |
+| `FLOWTRACK_DATABASE_URL` | URL de conexão PostgreSQL (padrão: `postgresql://flowtrack:flowtrack@localhost:5433/flowtrack`) |
+| `FLOWTRACK_DB_PORT` | Porta do PostgreSQL no Docker Compose (padrão: `5433`) |
 | `FLOWTRACK_GITHUB_TOKEN` | Personal access token do GitHub |
 | `FLOWTRACK_GITHUB_OWNER` | Owner do repositório GitHub |
 | `FLOWTRACK_GITHUB_REPO` | Nome do repositório GitHub |
@@ -124,10 +128,10 @@ uv run alembic upgrade head
 | `FLOWTRACK_JIRA_TOKEN` | API token do Jira |
 | `FLOWTRACK_AUTO_SYNC` | Sync automático ao encerrar sessão (padrão: `true`) |
 
-Ao usar Docker Compose, a URL do banco já está configurada:
+Ao usar Docker Compose, a URL do banco já vem configurada no `.env.example`:
 
 ```
-FLOWTRACK_DATABASE_URL=postgresql://flowtrack:flowtrack@localhost:5432/flowtrack
+FLOWTRACK_DATABASE_URL=postgresql://flowtrack:flowtrack@localhost:5433/flowtrack
 ```
 
 ### Configuração interativa
