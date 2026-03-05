@@ -1,0 +1,30 @@
+# Python-generated files
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+wheels/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+
+# Environment
+.env
+
+# Database
+*.db
+*.sqlite3
+
+# Type checking / linting
+.mypy_cache/
+.ruff_cache/
+
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
