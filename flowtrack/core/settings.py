@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     jira_base_url: str = ""
     jira_email: str = ""
     jira_token: str = ""
+    jira_project_key: str = ""
     auto_sync: bool = True
 
 

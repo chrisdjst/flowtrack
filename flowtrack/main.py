@@ -10,6 +10,7 @@ from flowtrack.cli.report import app as report_app
 from flowtrack.cli.review import app as review_app
 from flowtrack.cli.status import app as status_app
 from flowtrack.cli.sync import app as sync_app
+from flowtrack.cli.task import app as task_app
 from flowtrack.cli.test_cmd import app as test_app
 
 app = typer.Typer(name="flowtrack", help="CLI for capturing SPACE + DORA productivity metrics.")
@@ -25,6 +26,7 @@ app.add_typer(sync_app, name="sync")
 app.add_typer(report_app, name="report")
 app.add_typer(config_app, name="config")
 app.add_typer(status_app, name="status")
+app.add_typer(task_app, name="task")
 
 if __name__ == "__main__":
     app()

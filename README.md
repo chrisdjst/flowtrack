@@ -134,6 +134,7 @@ flowtrack db upgrade
 | `FLOWTRACK_JIRA_BASE_URL` | URL base do Jira (ex: `https://empresa.atlassian.net`) |
 | `FLOWTRACK_JIRA_EMAIL` | Email da conta Jira |
 | `FLOWTRACK_JIRA_TOKEN` | API token do Jira |
+| `FLOWTRACK_JIRA_PROJECT_KEY` | Chave do projeto Jira para criação automática de issues (ex: `FLOW`) |
 | `FLOWTRACK_AUTO_SYNC` | Sync automático ao encerrar sessão (padrão: `true`) |
 
 Ao usar Docker Compose, a URL do banco já vem configurada no `.env.example`:
@@ -202,6 +203,59 @@ flowtrack interrupt end
 flowtrack deploy --env production
 flowtrack deploy --env staging
 ```
+
+### Tarefas
+
+```bash
+# Criar tarefa (interativo — pergunta título, descrição, status, prioridade)
+flowtrack task add
+
+# Criar tarefa com argumentos diretos
+flowtrack task add "Implementar OAuth" --desc "Login via GitHub" --priority high --ticket PROJ-42
+
+# Criar tarefa e issue no Jira automaticamente (requer JIRA_PROJECT_KEY)
+flowtrack task add "Nova feature" --desc "Descrição detalhada" --priority high
+
+# Criar tarefa sem criar no Jira
+flowtrack task add "Tarefa local" --no-jira
+
+# Listar todas as tarefas
+flowtrack task list
+
+# Filtrar por status
+flowtrack task list --status in_progress
+
+# Atualizar status (aceita os 8 primeiros caracteres do ID)
+flowtrack task update abc12345 --status done
+
+# Remover tarefa
+flowtrack task rm abc12345
+flowtrack task rm abc12345 --force   # sem confirmação
+```
+
+**Status disponíveis:** `todo`, `in_progress`, `blocked`, `in_review`, `done`
+**Prioridades:** `low`, `medium`, `high`, `urgent`
+
+### Comentários em tarefas
+
+```bash
+# Comentar na tarefa em andamento (in_progress)
+flowtrack task comment "Revisão do PR concluída"
+
+# Comentar em uma tarefa específica pelo ID
+flowtrack task comment "Aguardando deploy" --task abc12345
+
+# Comentar sem sincronizar ao Jira
+flowtrack task comment "Nota local" --no-jira
+
+# Ver comentários da tarefa em andamento
+flowtrack task comments
+
+# Ver comentários de uma tarefa específica
+flowtrack task comments abc12345
+```
+
+> Se a tarefa tiver um `ticket_id` vinculado, os comentários são automaticamente sincronizados ao Jira.
 
 ### Incidentes
 
