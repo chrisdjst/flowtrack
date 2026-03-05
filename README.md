@@ -17,35 +17,101 @@ CLI para captura de métricas de produtividade baseada nos frameworks **SPACE** 
 - **Change Failure Rate** — taxa de falha após deploy
 - **Mean Time to Recovery (MTTR)** — tempo médio de resolução de incidentes
 
-## Pré-requisitos
+## Quick Start
+
+### Setup automatizado
+
+O script instala o uv, Python, dependências, cria o `.env` e sobe o banco de dados com Docker.
+
+**Windows (PowerShell):**
+
+```powershell
+git clone https://github.com/chrisdjst/flowtrack.git
+cd flowtrack
+.\scripts\setup.ps1
+```
+
+**Linux / macOS:**
+
+```bash
+git clone https://github.com/chrisdjst/flowtrack.git
+cd flowtrack
+bash scripts/setup.sh
+```
+
+Após o setup, edite o `.env` com suas credenciais e pronto:
+
+```bash
+uv run flowtrack --help
+```
+
+### Setup com Docker Compose (somente banco)
+
+Se preferir gerenciar apenas o PostgreSQL via Docker:
+
+```bash
+docker compose up -d db        # Sobe o PostgreSQL
+uv sync                        # Instala dependências
+uv run alembic upgrade head    # Roda migrações
+```
+
+## Instalação manual
+
+### Pré-requisitos
 
 - Python 3.12+
 - PostgreSQL
 - [uv](https://docs.astral.sh/uv/) (gerenciador de pacotes)
 
-## Instalação
+### Passo a passo
 
 ```bash
 # Clone o repositório
 git clone https://github.com/chrisdjst/flowtrack.git
 cd flowtrack
 
-# Instale as dependências com uv
+# Instale o uv (caso não tenha)
+# Windows:  powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+# Linux:    curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Instale o Python 3.13 via uv
+uv python install 3.13
+
+# Instale as dependências
 uv sync
 
 # Instale as dependências de desenvolvimento
 uv sync --group dev
+
+# Copie e edite o .env
+cp .env.example .env   # Linux/macOS
+copy .env.example .env # Windows
+```
+
+### Banco de dados
+
+**Opção A — Docker (recomendado):**
+
+```bash
+docker compose up -d db
+```
+
+**Opção B — PostgreSQL local:**
+
+```bash
+createdb flowtrack
+# ou via psql: CREATE DATABASE flowtrack;
+```
+
+Depois rode as migrações:
+
+```bash
+uv run alembic upgrade head
 ```
 
 ## Configuração
 
-### 1. Variáveis de ambiente
-
-Copie o arquivo de exemplo e preencha com suas credenciais:
-
-```bash
-cp .env.example .env
-```
+### Variáveis de ambiente
 
 | Variável | Descrição |
 |---|---|
@@ -58,27 +124,17 @@ cp .env.example .env
 | `FLOWTRACK_JIRA_TOKEN` | API token do Jira |
 | `FLOWTRACK_AUTO_SYNC` | Sync automático ao encerrar sessão (padrão: `true`) |
 
-### 2. Banco de dados
+Ao usar Docker Compose, a URL do banco já está configurada:
 
-Crie o banco PostgreSQL e rode as migrações:
-
-```bash
-createdb flowtrack
-uv run alembic upgrade head
+```
+FLOWTRACK_DATABASE_URL=postgresql://flowtrack:flowtrack@localhost:5432/flowtrack
 ```
 
-### 3. Configuração interativa
-
-Alternativamente, configure credenciais via CLI:
+### Configuração interativa
 
 ```bash
-uv run flowtrack config
-```
-
-Para visualizar a configuração atual:
-
-```bash
-uv run flowtrack config --show
+uv run flowtrack config          # Configura credenciais
+uv run flowtrack config --show   # Exibe configuração atual
 ```
 
 ## Uso
@@ -206,6 +262,11 @@ flowtrack/
 ├── models/            # Modelos SQLAlchemy
 ├── repositories/      # Camada de acesso a dados
 ├── services/          # Lógica de negócio
+├── scripts/           # Scripts de setup
+│   ├── setup.ps1      # Windows (PowerShell)
+│   └── setup.sh       # Linux / macOS
+├── Dockerfile
+├── docker-compose.yml
 └── main.py            # Entry point CLI
 ```
 
@@ -216,10 +277,11 @@ flowtrack/
 - **Migrações**: [Alembic](https://alembic.sqlalchemy.org/)
 - **HTTP Client**: [httpx](https://www.python-httpx.org/)
 - **Configuração**: [Pydantic Settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/)
-- **Banco de dados**: PostgreSQL
+- **Banco de dados**: PostgreSQL (via Docker ou local)
 - **Testes**: pytest + pytest-cov
 - **Linting**: Ruff
 - **Type checking**: mypy (strict)
+- **Package manager**: [uv](https://docs.astral.sh/uv/)
 
 ## Licença
 
