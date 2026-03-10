@@ -36,6 +36,25 @@ class TaskRepository:
         self.db.flush()
         return task
 
+    def update(
+        self,
+        task: Task,
+        title: str | None = None,
+        description: str | None = None,
+        status: TaskStatus | None = None,
+        priority: TaskPriority | None = None,
+    ) -> Task:
+        if title is not None:
+            task.title = title
+        if description is not None:
+            task.description = description
+        if status is not None:
+            task.status = status
+        if priority is not None:
+            task.priority = priority
+        self.db.flush()
+        return task
+
     def list_all(self, status: TaskStatus | None = None) -> list[Task]:
         query = self.db.query(Task)
         if status:

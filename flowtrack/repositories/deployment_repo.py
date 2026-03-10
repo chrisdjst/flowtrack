@@ -51,3 +51,13 @@ class DeploymentRepository:
             .order_by(Deployment.deployed_at)
             .all()
         )
+
+    def list_all(
+        self,
+        environment: Environment | None = None,
+        limit: int = 10,
+    ) -> list[Deployment]:
+        query = self.db.query(Deployment)
+        if environment:
+            query = query.filter(Deployment.environment == environment)
+        return query.order_by(Deployment.deployed_at.desc()).limit(limit).all()

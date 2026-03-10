@@ -5,6 +5,7 @@ CLI para captura de métricas de produtividade baseada nos frameworks **SPACE** 
 ## O que é medido?
 
 ### SPACE Metrics
+
 - **Satisfaction & Well-being** — tempo em flow vs. tempo bloqueado
 - **Performance** — sessões por dia, duração de code reviews
 - **Activity** — sessões de desenvolvimento, review e testes
@@ -12,6 +13,7 @@ CLI para captura de métricas de produtividade baseada nos frameworks **SPACE** 
 - **Efficiency & Flow** — flow time ratio, blocking ratio
 
 ### DORA Metrics
+
 - **Deployment Frequency** — frequência de deploys por dia
 - **Lead Time for Changes** — tempo entre commit e deploy
 - **Change Failure Rate** — taxa de falha após deploy
@@ -124,18 +126,18 @@ flowtrack db upgrade
 
 ### Variáveis de ambiente
 
-| Variável | Descrição |
-|---|---|
-| `FLOWTRACK_DATABASE_URL` | URL de conexão PostgreSQL (padrão: `postgresql://flowtrack:flowtrack@localhost:5433/flowtrack`) |
-| `FLOWTRACK_DB_PORT` | Porta do PostgreSQL no Docker Compose (padrão: `5433`) |
-| `FLOWTRACK_GITHUB_TOKEN` | Personal access token do GitHub |
-| `FLOWTRACK_GITHUB_OWNER` | Owner do repositório GitHub |
-| `FLOWTRACK_GITHUB_REPO` | Nome do repositório GitHub |
-| `FLOWTRACK_JIRA_BASE_URL` | URL base do Jira (ex: `https://empresa.atlassian.net`) |
-| `FLOWTRACK_JIRA_EMAIL` | Email da conta Jira |
-| `FLOWTRACK_JIRA_TOKEN` | API token do Jira |
-| `FLOWTRACK_JIRA_PROJECT_KEY` | Chave do projeto Jira para criação automática de issues (ex: `FLOW`) |
-| `FLOWTRACK_AUTO_SYNC` | Sync automático ao encerrar sessão (padrão: `true`) |
+| Variável                     | Descrição                                                                                       |
+| ---------------------------- | ----------------------------------------------------------------------------------------------- |
+| `FLOWTRACK_DATABASE_URL`     | URL de conexão PostgreSQL (padrão: `postgresql://flowtrack:flowtrack@localhost:5433/flowtrack`) |
+| `FLOWTRACK_DB_PORT`          | Porta do PostgreSQL no Docker Compose (padrão: `5433`)                                          |
+| `FLOWTRACK_GITHUB_TOKEN`     | Personal access token do GitHub                                                                 |
+| `FLOWTRACK_GITHUB_OWNER`     | Owner do repositório GitHub                                                                     |
+| `FLOWTRACK_GITHUB_REPO`      | Nome do repositório GitHub                                                                      |
+| `FLOWTRACK_JIRA_BASE_URL`    | URL base do Jira (ex: `https://empresa.atlassian.net`)                                          |
+| `FLOWTRACK_JIRA_EMAIL`       | Email da conta Jira                                                                             |
+| `FLOWTRACK_JIRA_TOKEN`       | API token do Jira                                                                               |
+| `FLOWTRACK_JIRA_PROJECT_KEY` | Chave do projeto Jira para criação automática de issues (ex: `FLOW`)                            |
+| `FLOWTRACK_AUTO_SYNC`        | Sync automático ao encerrar sessão (padrão: `true`)                                             |
 
 Ao usar Docker Compose, a URL do banco já vem configurada no `.env.example`:
 

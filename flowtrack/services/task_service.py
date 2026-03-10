@@ -4,8 +4,8 @@ import uuid
 
 from sqlalchemy.orm import Session as DbSession
 
+from flowtrack.core.credentials import get_credential
 from flowtrack.core.exceptions import FlowTrackError
-from flowtrack.core.settings import settings
 from flowtrack.integrations.jira_client import JiraClient
 from flowtrack.models.task import Task, TaskPriority, TaskStatus
 from flowtrack.models.task_comment import TaskComment
@@ -50,9 +50,9 @@ class TaskService:
         """Create a task. Returns (task, jira_key) where jira_key is set if synced."""
         jira_key = None
 
-        if sync_jira and not ticket_id and settings.jira_project_key:
+        if sync_jira and not ticket_id and get_credential("jira_project_key"):
             jira_key = self.jira.create_issue(
-                project_key=settings.jira_project_key,
+                project_key=get_credential("jira_project_key"),
                 summary=title,
                 description=description,
                 priority=PRIORITY_TO_JIRA.get(priority),
@@ -93,6 +93,19 @@ class TaskService:
     def update_status(self, task_id: uuid.UUID, status: TaskStatus) -> Task:
         task = self._get_or_raise(task_id)
         return self.repo.update_status(task, status)
+
+    def update(
+        self,
+        task_id: uuid.UUID,
+        status: TaskStatus | None = None,
+        title: str | None = None,
+        description: str | None = None,
+        priority: TaskPriority | None = None,
+    ) -> Task:
+        task = self._get_or_raise(task_id)
+        return self.repo.update(
+            task, title=title, description=description, status=status, priority=priority,
+        )
 
     def list(self, status: TaskStatus | None = None) -> list[Task]:
         return self.repo.list_all(status)

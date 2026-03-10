@@ -29,6 +29,13 @@ class DeployService:
             ticket_id=ticket_id or (session.ticket_id if session else None),
         )
 
+    def list_deploys(
+        self,
+        environment: Environment | None = None,
+        limit: int = 10,
+    ) -> list[Deployment]:
+        return self.repo.list_all(environment=environment, limit=limit)
+
     def _get_current_commit(self) -> str | None:
         try:
             result = subprocess.run(

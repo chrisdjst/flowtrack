@@ -2,21 +2,24 @@ import base64
 
 import httpx
 
-from flowtrack.core.settings import settings
+from flowtrack.core.credentials import load_credentials
 
 
 class JiraClient:
-    def _headers(self) -> dict[str, str]:
+    def _get_creds(self) -> dict[str, str]:
+        return load_credentials("jira_base_url", "jira_email", "jira_token")
+
+    def _headers(self, creds: dict[str, str]) -> dict[str, str]:
         credentials = base64.b64encode(
-            f"{settings.jira_email}:{settings.jira_token}".encode()
+            f"{creds['jira_email']}:{creds['jira_token']}".encode()
         ).decode()
         return {
             "Authorization": f"Basic {credentials}",
             "Content-Type": "application/json",
         }
 
-    def _is_configured(self) -> bool:
-        return bool(settings.jira_base_url and settings.jira_email and settings.jira_token)
+    def _is_configured(self, creds: dict[str, str]) -> bool:
+        return bool(creds.get("jira_base_url") and creds.get("jira_email") and creds.get("jira_token"))
 
     def create_issue(
         self,
@@ -27,10 +30,11 @@ class JiraClient:
         priority: str | None = None,
     ) -> str | None:
         """Create a Jira issue. Returns the issue key (e.g. 'PROJ-123') or None on failure."""
-        if not self._is_configured():
+        creds = self._get_creds()
+        if not self._is_configured(creds):
             return None
 
-        url = f"{settings.jira_base_url}/rest/api/3/issue"
+        url = f"{creds['jira_base_url']}/rest/api/3/issue"
 
         desc_content = []
         if description:
@@ -62,7 +66,7 @@ class JiraClient:
             payload["fields"]["priority"] = {"name": priority}
 
         try:
-            response = httpx.post(url, json=payload, headers=self._headers(), timeout=10)
+            response = httpx.post(url, json=payload, headers=self._headers(creds), timeout=10)
             if response.status_code == 201:
                 return response.json().get("key")
             return None
@@ -70,10 +74,11 @@ class JiraClient:
             return None
 
     def post_comment(self, ticket_id: str, body: str) -> bool:
-        if not self._is_configured():
+        creds = self._get_creds()
+        if not self._is_configured(creds):
             return False
 
-        url = f"{settings.jira_base_url}/rest/api/3/issue/{ticket_id}/comment"
+        url = f"{creds['jira_base_url']}/rest/api/3/issue/{ticket_id}/comment"
 
         adf_body = {
             "body": {
@@ -91,7 +96,7 @@ class JiraClient:
         }
 
         try:
-            response = httpx.post(url, json=adf_body, headers=self._headers(), timeout=10)
+            response = httpx.post(url, json=adf_body, headers=self._headers(creds), timeout=10)
             return response.status_code in (200, 201)
         except httpx.HTTPError:
             return False

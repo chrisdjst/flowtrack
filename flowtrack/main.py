@@ -2,6 +2,7 @@ import typer
 
 from flowtrack.cli.block import app as block_app
 from flowtrack.cli.config import app as config_app
+from flowtrack.cli.log import app as log_app
 from flowtrack.cli.deploy import app as deploy_app
 from flowtrack.cli.dev import app as dev_app
 from flowtrack.cli.incident import app as incident_app
@@ -26,6 +27,7 @@ app.add_typer(sync_app, name="sync")
 app.add_typer(report_app, name="report")
 app.add_typer(config_app, name="config")
 app.add_typer(status_app, name="status")
+app.add_typer(log_app, name="log")
 app.add_typer(task_app, name="task")
 
 if __name__ == "__main__":

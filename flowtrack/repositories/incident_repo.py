@@ -58,3 +58,13 @@ class IncidentRepository:
             .order_by(Incident.started_at)
             .all()
         )
+
+    def list_all(
+        self,
+        open_only: bool = False,
+        limit: int = 10,
+    ) -> list[Incident]:
+        query = self.db.query(Incident)
+        if open_only:
+            query = query.filter(Incident.resolved_at.is_(None))
+        return query.order_by(Incident.started_at.desc()).limit(limit).all()

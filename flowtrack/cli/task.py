@@ -2,6 +2,7 @@ import uuid
 from typing import Optional
 
 import typer
+from rich.panel import Panel
 from rich.table import Table
 
 from flowtrack.core.console import console
@@ -136,22 +137,47 @@ def list_tasks(
 @app.command()
 def update(
     task_id: str = typer.Argument(help="Task ID (first 8 chars or full UUID)"),
-    status: str = typer.Option(..., "--status", "-s", help="New status: todo|in_progress|blocked|in_review|done"),
+    status: Optional[str] = typer.Option(None, "--status", "-s", help="New status: todo|in_progress|blocked|in_review|done"),
+    title: Optional[str] = typer.Option(None, "--title", help="New title"),
+    description: Optional[str] = typer.Option(None, "--desc", "-d", help="New description"),
+    priority: Optional[str] = typer.Option(None, "--priority", "-p", help="New priority: low|medium|high|urgent"),
 ) -> None:
-    """Update a task's status."""
-    try:
-        task_status = TaskStatus(status)
-    except ValueError:
-        console.print(f"[red]Invalid status:[/red] {status}. Use: {', '.join(STATUS_CHOICES)}")
+    """Update a task."""
+    if not any([status, title, description, priority]):
+        console.print("[red]Provide at least one option to update (--status, --title, --desc, --priority)[/red]")
         raise typer.Exit(1)
+
+    task_status = None
+    if status:
+        try:
+            task_status = TaskStatus(status)
+        except ValueError:
+            console.print(f"[red]Invalid status:[/red] {status}. Use: {', '.join(STATUS_CHOICES)}")
+            raise typer.Exit(1)
+
+    task_priority = None
+    if priority:
+        try:
+            task_priority = TaskPriority(priority)
+        except ValueError:
+            console.print(f"[red]Invalid priority:[/red] {priority}. Use: {', '.join(PRIORITY_CHOICES)}")
+            raise typer.Exit(1)
 
     try:
         full_id = _resolve_task_id(task_id)
         with get_db() as db:
             svc = TaskService(db)
-            task = svc.update_status(full_id, task_status)
-            s_color = STATUS_COLORS.get(task.status, "white")
-            console.print(f"[green]Task updated[/green] [{s_color}]{task.status.value}[/{s_color}] — {task.title}")
+            task = svc.update(
+                full_id, status=task_status, title=title,
+                description=description, priority=task_priority,
+            )
+            console.print(f"[green]Task updated[/green] — {task.title}")
+            if task_status:
+                s_color = STATUS_COLORS.get(task.status, "white")
+                console.print(f"  Status: [{s_color}]{task.status.value}[/{s_color}]")
+            if priority:
+                p_color = PRIORITY_COLORS.get(task.priority, "white")
+                console.print(f"  Priority: [{p_color}]{task.priority.value}[/{p_color}]")
     except FlowTrackError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
@@ -222,6 +248,50 @@ def comments(
             for c in task_comments:
                 jira_tag = " [cyan](jira)[/cyan]" if c.synced_to_jira else ""
                 console.print(f"  [{c.created_at:%Y-%m-%d %H:%M}]{jira_tag} {c.body}")
+    except FlowTrackError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@app.command()
+def show(
+    task_id: str = typer.Argument(help="Task ID (first 8 chars or full UUID)"),
+) -> None:
+    """Show task details with comments."""
+    try:
+        full_id = _resolve_task_id(task_id)
+        with get_db() as db:
+            svc = TaskService(db)
+            task = svc._get_or_raise(full_id)
+            task_comments = svc.get_comments(full_id)
+
+            s_color = STATUS_COLORS.get(task.status, "white")
+            p_color = PRIORITY_COLORS.get(task.priority, "white")
+
+            table = Table(show_header=False, box=None, padding=(0, 2))
+            table.add_column("Key", style="bold cyan")
+            table.add_column("Value")
+
+            table.add_row("ID", str(task.id)[:8])
+            table.add_row("Title", task.title)
+            if task.description:
+                table.add_row("Description", task.description)
+            table.add_row("Status", f"[{s_color}]{task.status.value}[/{s_color}]")
+            table.add_row("Priority", f"[{p_color}]{task.priority.value}[/{p_color}]")
+            if task.ticket_id:
+                table.add_row("Ticket", task.ticket_id)
+            table.add_row("Created", f"{task.created_at:%Y-%m-%d %H:%M}")
+
+            console.print(Panel(table, title="Task Details", expand=False))
+
+            if task_comments:
+                console.print()
+                console.print("[bold]Comments:[/bold]")
+                for c in task_comments:
+                    jira_tag = " [cyan](jira)[/cyan]" if c.synced_to_jira else ""
+                    console.print(f"  [{c.created_at:%Y-%m-%d %H:%M}]{jira_tag} {c.body}")
+            else:
+                console.print("\n[dim]No comments.[/dim]")
     except FlowTrackError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
