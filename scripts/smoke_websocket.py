@@ -17,6 +17,7 @@ import os
 import shutil
 import socket
 import sys
+import uuid as _uuid
 from collections import Counter
 from pathlib import Path
 
@@ -26,6 +27,8 @@ import websockets
 REPO = Path(__file__).resolve().parents[1]
 MOCK = REPO / "scripts" / "mock_claude.py"
 WORKTREES = REPO / ".smoke-worktrees"
+
+WORKER_ID = f"smoke-ws-{_uuid.uuid4().hex[:8]}"
 
 
 def _free_port() -> int:
@@ -74,6 +77,7 @@ async def main() -> int:
         "FLOWTRACK_TARGET_REPO_PATH": str(REPO),
         "FLOWTRACK_WORKTREE_ROOT": str(WORKTREES),
         "FLOWTRACK_API_PORT": str(port),
+        "FLOWTRACK_WORKER_ID": WORKER_ID,
     }
 
     # Launch the server.
@@ -146,10 +150,10 @@ async def main() -> int:
 
                 r = await c.post(
                     f"{base_url}/api/tasks/{task_id}/assign",
-                    json={"role_name": "dev", "priority": 10},
+                    json={"role_name": "dev", "priority": 10, "worker_id": WORKER_ID},
                 )
                 r.raise_for_status()
-                print(f"queued dev job for task={task_id}")
+                print(f"queued dev job for task={task_id} worker={WORKER_ID}")
 
                 # Wait for pipeline completion (poll the kanban).
                 deadline = 60.0

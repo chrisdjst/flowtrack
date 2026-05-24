@@ -314,12 +314,25 @@ def _advance_pipeline(
                 role.name, role.next_role_name, task.id,
             )
             return
-        db.add(Job(task_id=task.id, role_id=next_role.id, priority=100))
-        log.info("pipeline: %s -> %s enqueued for task %s", role.name, next_role.name, task.id)
+        # Propagate the just-finished instance's worker_id so the chained job
+        # stays in the same lane. Tests rely on this — without it, a chained
+        # reviewer job would escape the smoke's lane and a production daemon
+        # could claim it.
+        inst = db.get(Instance, instance_id)
+        next_worker_id = inst.worker_id if inst is not None else None
+        db.add(Job(
+            task_id=task.id,
+            role_id=next_role.id,
+            priority=100,
+            worker_id=next_worker_id,
+        ))
+        log.info("pipeline: %s -> %s enqueued for task %s (worker=%s)",
+                 role.name, next_role.name, task.id, next_worker_id)
         broker.publish_sync("job_enqueued", {
             "task_id": str(task.id),
             "role_name": next_role.name,
             "from_role": role.name,
+            "worker_id": next_worker_id,
         })
 
 

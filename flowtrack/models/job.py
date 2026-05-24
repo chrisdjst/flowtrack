@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Enum, ForeignKey, Text
+from sqlalchemy import Enum, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -44,6 +44,9 @@ class Job(TimestampMixin, Base):
     )
     finished_at: Mapped[datetime | None]
     last_error: Mapped[str | None] = mapped_column(Text)
+    # Isolation lane: NULL = any daemon can claim. When set, only a daemon
+    # whose worker_id matches will pick it up. See alembic 007 + identity.py.
+    worker_id: Mapped[str | None] = mapped_column(String(100))
 
     task = relationship("Task")
     role = relationship("Role")

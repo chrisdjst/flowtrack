@@ -67,6 +67,9 @@ class KanbanBoard(_Base):
 class AssignTaskRequest(BaseModel):
     role_name: str
     priority: int = 100
+    # Optional isolation lane. Defaults to NULL = any daemon can claim.
+    # Tests / parallel daemons set this to a unique value to avoid cross-pickup.
+    worker_id: str | None = None
 
 
 class JobResponse(_Base):

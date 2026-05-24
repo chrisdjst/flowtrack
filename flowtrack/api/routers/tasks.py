@@ -37,7 +37,12 @@ def assign_task(
             status.HTTP_404_NOT_FOUND, detail=f"role '{payload.role_name}' not found"
         )
 
-    job = Job(task_id=task.id, role_id=role.id, priority=payload.priority)
+    job = Job(
+        task_id=task.id,
+        role_id=role.id,
+        priority=payload.priority,
+        worker_id=payload.worker_id,
+    )
     db.add(job)
     db.flush()  # populate id/created_at without ending the txn
     return job

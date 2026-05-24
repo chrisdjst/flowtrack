@@ -21,11 +21,16 @@ import asyncio
 import os
 import shutil
 import sys
+import uuid as _uuid
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 MOCK = REPO / "scripts" / "mock_claude.py"
 WORKTREES = REPO / ".smoke-worktrees"
+
+# Per-run isolation lane so stray daemons (or other smokes) don't race us
+# for the jobs this script creates. See alembic 007.
+WORKER_ID = f"smoke-orch-{_uuid.uuid4().hex[:8]}"
 
 # Settings must be in env BEFORE importing the orchestrator.
 os.environ.setdefault(
@@ -38,6 +43,7 @@ os.environ["FLOWTRACK_ORCHESTRATOR_LOOP_INTERVAL_SECONDS"] = "0.3"
 os.environ["FLOWTRACK_CLAUDE_EXECUTABLE"] = f'"{sys.executable}" "{MOCK}"'
 os.environ["FLOWTRACK_TARGET_REPO_PATH"] = str(REPO)
 os.environ["FLOWTRACK_WORKTREE_ROOT"] = str(WORKTREES)
+os.environ["FLOWTRACK_WORKER_ID"] = WORKER_ID
 
 from sqlalchemy import func, select  # noqa: E402
 
@@ -77,11 +83,11 @@ async def main() -> int:
         )
         db.add(task)
         db.flush()
-        job = Job(task_id=task.id, role_id=dev_role.id, priority=10)
+        job = Job(task_id=task.id, role_id=dev_role.id, priority=10, worker_id=WORKER_ID)
         db.add(job)
         db.commit()
         task_id, job_id = task.id, job.id
-        print(f"queued: task={task_id} job={job_id}")
+        print(f"queued: task={task_id} job={job_id} worker={WORKER_ID}")
     finally:
         db.close()
 

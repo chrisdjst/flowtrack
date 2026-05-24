@@ -25,6 +25,7 @@ from flowtrack.core.settings import settings
 from flowtrack.models import Instance, Job
 from flowtrack.models.instance import InstanceStatus
 from flowtrack.models.job import JobStatus
+from flowtrack.orchestrator.identity import worker_id
 from flowtrack.orchestrator.queue import claim_next_job, queue_depth, release_job
 from flowtrack.orchestrator.spawner import supervise
 
@@ -101,11 +102,12 @@ def _claim_one(tick_no: int, heartbeat_every: int) -> tuple[UUID, UUID] | None:
             role_id=job.role_id,
             task_id=job.task_id,
             status=InstanceStatus.SPAWNING,
+            worker_id=worker_id(),
         )
         db.add(instance)
         db.flush()
         job.claimed_by = instance.id
-        log.info("claimed job %s → instance %s", job.id, instance.id)
+        log.info("claimed job %s -> instance %s (worker=%s)", job.id, instance.id, worker_id())
         return job.id, instance.id
 
 

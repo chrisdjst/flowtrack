@@ -54,6 +54,8 @@ class Instance(Base):
     cost_usd: Mapped[Decimal] = mapped_column(Numeric(10, 4), default=Decimal("0"))
     last_heartbeat_at: Mapped[datetime | None]
     metadata_json: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # The daemon process that spawned this instance (audit/debug).
+    worker_id: Mapped[str | None] = mapped_column(String(100))
 
     role = relationship("Role")
     task = relationship("Task", foreign_keys=[task_id])
