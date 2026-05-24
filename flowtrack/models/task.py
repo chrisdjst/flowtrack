@@ -1,7 +1,7 @@
 import enum
 import uuid
 
-from sqlalchemy import Enum, String, Text
+from sqlalchemy import Enum, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -13,6 +13,7 @@ class TaskStatus(str, enum.Enum):
     IN_PROGRESS = "in_progress"
     BLOCKED = "blocked"
     IN_REVIEW = "in_review"
+    IN_QA = "in_qa"
     DONE = "done"
 
 
@@ -38,5 +39,17 @@ class Task(TimestampMixin, Base):
         default=TaskPriority.MEDIUM,
     )
     ticket_id: Mapped[str | None] = mapped_column(String(100))
+    # Orchestrator extension columns.
+    discovered_from: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("discovered_items.id")
+    )
+    # Heuristic for resource_locks: which module the task touches (e.g., "billing").
+    module_hint: Mapped[str | None] = mapped_column(String(100))
+    # Written by PM agent; required before role=dev picks the task up.
+    acceptance_criteria: Mapped[str | None] = mapped_column(Text)
+    parent_task_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tasks.id")
+    )
 
     comments = relationship("TaskComment", back_populates="task", order_by="TaskComment.created_at")
+    parent = relationship("Task", remote_side=[id], foreign_keys=[parent_task_id])

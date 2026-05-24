@@ -14,5 +14,12 @@ class TaskComment(TimestampMixin, Base):
     task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tasks.id"), nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
     synced_to_jira: Mapped[bool] = mapped_column(default=False)
+    # NULL author_role_id = human comment.
+    author_role_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("roles.id")
+    )
+    instance_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("instances.id")
+    )
 
     task = relationship("Task", back_populates="comments")

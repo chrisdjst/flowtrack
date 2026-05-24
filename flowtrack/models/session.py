@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Enum, String
+from sqlalchemy import Enum, ForeignKey, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -32,6 +32,10 @@ class Session(TimestampMixin, Base):
     ended_at: Mapped[datetime | None]
     status: Mapped[SessionStatus] = mapped_column(
         Enum(SessionStatus, name="session_status"), default=SessionStatus.ACTIVE
+    )
+    # NULL = manual CLI session; set = session owned by an orchestrator instance.
+    instance_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("instances.id")
     )
 
     events = relationship("Event", back_populates="session")
