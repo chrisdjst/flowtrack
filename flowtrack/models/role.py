@@ -23,6 +23,11 @@ class Role(TimestampMixin, Base):
     model: Mapped[str] = mapped_column(String(50), default="claude-sonnet-4-6")
     max_tokens: Mapped[int] = mapped_column(default=500_000)
     max_minutes: Mapped[int] = mapped_column(default=60)
+    # Pipeline: when this role completes successfully, enqueue next_role_name
+    # for the same task and set tasks.status = task_status_on_success.
+    # NULL on either field = pipeline ends here.
+    next_role_name: Mapped[str | None] = mapped_column(String(50))
+    task_status_on_success: Mapped[str | None] = mapped_column(String(50))
     updated_at: Mapped[datetime] = mapped_column(
         server_default=func.now(), onupdate=func.now()
     )

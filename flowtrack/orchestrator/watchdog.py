@@ -1,0 +1,121 @@
+"""Background sweeper for stuck instances and expired locks.
+
+Runs alongside the main orchestrator loop (separate asyncio task). Two jobs:
+
+1. **Stale instances**: an instance whose ``last_heartbeat_at`` is older than
+   ``role.max_minutes * 2`` (with a floor) is considered dead. We mark it as
+   ``KILLED`` and release its locks. We do NOT try to ``proc.kill()`` — the
+   spawner owns the process handle and will SIGKILL on its own timeout. The
+   watchdog only cleans up DB state for instances whose supervisor process
+   itself crashed without finalizing.
+
+2. **Expired locks**: locks past ``expires_at`` are dropped. Normally
+   ``release_all`` runs at finalize and locks never expire, but if a supervisor
+   crashes we depend on TTL to free the resource.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from flowtrack.core.database import SessionLocal
+from flowtrack.core.settings import settings
+from flowtrack.models import Instance, Job, Role
+from flowtrack.models.instance import InstanceStatus
+from flowtrack.models.job import JobStatus
+from flowtrack.orchestrator import locks
+from flowtrack.orchestrator.queue import release_job
+
+log = logging.getLogger(__name__)
+
+# How often to sweep, in seconds.
+_SWEEP_INTERVAL = 30.0
+# Floor on the heartbeat staleness threshold, regardless of role config.
+_MIN_STALE_SECONDS = 120
+
+
+async def run_watchdog(stop: asyncio.Event) -> None:
+    """Top-level coroutine; returns when ``stop`` is set."""
+    log.info("watchdog started (sweep every %.0fs)", _SWEEP_INTERVAL)
+    while not stop.is_set():
+        try:
+            await asyncio.to_thread(_sweep_once)
+        except Exception:
+            log.exception("watchdog sweep crashed; continuing")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=_SWEEP_INTERVAL)
+        except asyncio.TimeoutError:
+            pass
+    log.info("watchdog stopped")
+
+
+def _sweep_once() -> None:
+    db: Session = SessionLocal()
+    try:
+        killed = _kill_stale_instances(db)
+        expired = locks.sweep_expired(db)
+        db.commit()
+        if killed or expired:
+            log.info("watchdog sweep: killed=%d stale_instances, expired=%d locks",
+                     killed, expired)
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def _kill_stale_instances(db: Session) -> int:
+    """Mark instances whose heartbeat is older than their role-derived threshold."""
+    now = datetime.now(tz=timezone.utc)
+    role_max_by_id = {r.id: r.max_minutes for r in db.scalars(select(Role))}
+
+    live_statuses = (
+        InstanceStatus.SPAWNING,
+        InstanceStatus.RUNNING,
+        InstanceStatus.WAITING_INPUT,
+    )
+    candidates = list(db.scalars(
+        select(Instance).where(Instance.status.in_(live_statuses))
+    ))
+
+    killed = 0
+    for inst in candidates:
+        # No heartbeat yet (still spawning) — give it the floor grace period.
+        if inst.last_heartbeat_at is None:
+            stale_after = inst.spawned_at + timedelta(seconds=_MIN_STALE_SECONDS)
+        else:
+            role_minutes = role_max_by_id.get(inst.role_id, settings.lock_default_ttl_minutes)
+            grace = max(role_minutes * 2 * 60, _MIN_STALE_SECONDS)
+            stale_after = inst.last_heartbeat_at + timedelta(seconds=grace)
+
+        if now < stale_after:
+            continue
+
+        log.warning(
+            "watchdog: killing stale instance %s (last_heartbeat=%s spawned=%s)",
+            inst.id, inst.last_heartbeat_at, inst.spawned_at,
+        )
+        inst.status = InstanceStatus.KILLED
+        inst.finished_at = now
+        locks.release_all(db, instance_id=inst.id)
+
+        # Best-effort: fail any job still attached to this instance.
+        for job in db.scalars(
+            select(Job).where(
+                Job.claimed_by == inst.id,
+                Job.status.in_((JobStatus.CLAIMED, JobStatus.RUNNING)),
+            )
+        ):
+            release_job(
+                db, job, final_status=JobStatus.FAILED,
+                error="watchdog: stale heartbeat",
+                instance_id=inst.id,
+            )
+        killed += 1
+    return killed

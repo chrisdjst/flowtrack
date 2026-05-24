@@ -20,6 +20,7 @@ from fastapi import FastAPI
 from flowtrack.api.routers import instances, kanban, tasks
 from flowtrack.core.settings import settings
 from flowtrack.orchestrator.loop import run_orchestrator
+from flowtrack.orchestrator.watchdog import run_watchdog
 
 log = logging.getLogger(__name__)
 
@@ -33,21 +34,23 @@ async def lifespan(app: FastAPI):
         settings.orchestrator_loop_interval_seconds,
     )
     stop_event = asyncio.Event()
-    task = asyncio.create_task(run_orchestrator(stop_event), name="orchestrator-loop")
+    bg_tasks = [
+        asyncio.create_task(run_orchestrator(stop_event), name="orchestrator-loop"),
+        asyncio.create_task(run_watchdog(stop_event), name="watchdog"),
+    ]
     try:
         yield
     finally:
-        log.info("stopping orchestrator...")
+        log.info("stopping background tasks...")
         stop_event.set()
         try:
-            await asyncio.wait_for(task, timeout=10)
+            await asyncio.wait_for(asyncio.gather(*bg_tasks, return_exceptions=True), timeout=15)
         except asyncio.TimeoutError:
-            log.warning("orchestrator did not stop in time, cancelling")
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+            log.warning("background tasks did not stop in time, cancelling")
+            for t in bg_tasks:
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*bg_tasks, return_exceptions=True)
 
 
 app = FastAPI(

@@ -26,11 +26,14 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from sqlalchemy import select
+
 from flowtrack.core.database import SessionLocal
 from flowtrack.core.settings import settings
-from flowtrack.models import Instance, Job, Role, Task
+from flowtrack.models import Instance, Job, Role, Task, TaskTransition
 from flowtrack.models.instance import InstanceStatus
 from flowtrack.models.job import JobStatus
+from flowtrack.models.task import TaskStatus
 from flowtrack.orchestrator import locks, worktree
 from flowtrack.orchestrator.queue import release_job
 from flowtrack.orchestrator.stream_parser import consume_stream
@@ -231,6 +234,55 @@ def _finalize(
         job = db.get(Job, job_id)
         if job is not None:
             release_job(db, job, final_status=job_status, error=error, instance_id=instance_id)
+        # On success: advance the task to the next pipeline step (role + status).
+        # Failure path stays put — caller can re-enqueue manually after triage.
+        if inst_status == InstanceStatus.COMPLETED and inst is not None and inst.task_id:
+            _advance_pipeline(db, task_id=inst.task_id, instance_id=instance_id, role_id=inst.role_id)
+
+
+def _advance_pipeline(
+    db: Session, *, task_id: UUID, instance_id: UUID, role_id: UUID
+) -> None:
+    """Apply role.task_status_on_success + enqueue role.next_role_name job.
+
+    Records a TaskTransition for the status change. If next_role_name points at
+    a missing role, logs and stops — does NOT raise (we already committed the
+    instance as completed; the chain is best-effort from here).
+    """
+    role = db.get(Role, role_id)
+    task = db.get(Task, task_id)
+    if role is None or task is None:
+        return
+
+    if role.task_status_on_success:
+        try:
+            new_status = TaskStatus(role.task_status_on_success)
+        except ValueError:
+            log.warning(
+                "role %s has invalid task_status_on_success=%s — skipping transition",
+                role.name, role.task_status_on_success,
+            )
+        else:
+            from_status = task.status.value if task.status else None
+            task.status = new_status
+            db.add(TaskTransition(
+                task_id=task.id,
+                from_status=from_status,
+                to_status=new_status.value,
+                instance_id=instance_id,
+                reason=f"pipeline: {role.name} completed",
+            ))
+
+    if role.next_role_name:
+        next_role = db.scalar(select(Role).where(Role.name == role.next_role_name))
+        if next_role is None:
+            log.warning(
+                "role %s.next_role_name=%s not found — pipeline halted for task %s",
+                role.name, role.next_role_name, task.id,
+            )
+            return
+        db.add(Job(task_id=task.id, role_id=next_role.id, priority=100))
+        log.info("pipeline: %s → %s enqueued for task %s", role.name, next_role.name, task.id)
 
 
 def _finalize_failed(instance_id: UUID, job_id: UUID, error: str) -> None:
