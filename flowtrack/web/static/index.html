@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>FlowTrack Orchestrator</title>
+  <link rel="stylesheet" href="/web/styles.css">
+</head>
+<body>
+  <header>
+    <h1>FlowTrack Orchestrator</h1>
+    <div id="status">
+      <span id="conn-state" class="off">●</span>
+      <span id="conn-label">connecting...</span>
+      <span class="sep">|</span>
+      <span id="dry-run-badge"></span>
+      <span class="sep">|</span>
+      <span id="instances-count">0 instances</span>
+      <span class="sep">|</span>
+      <span id="last-event">no events yet</span>
+    </div>
+  </header>
+
+  <main>
+    <section id="board"></section>
+
+    <aside id="instances-panel">
+      <h2>Active instances</h2>
+      <ul id="instances-list"></ul>
+    </aside>
+  </main>
+
+  <script src="/web/app.js"></script>
+</body>
+</html>

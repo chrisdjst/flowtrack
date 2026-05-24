@@ -14,14 +14,20 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
+from pathlib import Path
+
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from flowtrack.api.events import broker
 from flowtrack.api.routers import instances, kanban, tasks
 from flowtrack.core.settings import settings
 from flowtrack.orchestrator.loop import run_orchestrator
 from flowtrack.orchestrator.watchdog import run_watchdog
+
+_STATIC_DIR = Path(__file__).resolve().parent.parent / "web" / "static"
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +71,14 @@ app = FastAPI(
 app.include_router(kanban.router)
 app.include_router(tasks.router)
 app.include_router(instances.router)
+
+# Static assets (css/js) under /web/, and the index page at /.
+if _STATIC_DIR.is_dir():
+    app.mount("/web", StaticFiles(directory=_STATIC_DIR), name="web")
+
+    @app.get("/", include_in_schema=False)
+    def index() -> FileResponse:
+        return FileResponse(_STATIC_DIR / "index.html")
 
 
 @app.get("/healthz", tags=["meta"])
