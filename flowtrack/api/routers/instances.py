@@ -1,12 +1,15 @@
 from datetime import datetime, timedelta, timezone
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from flowtrack.api.deps import db_session
+from flowtrack.api.events import broker
 from flowtrack.api.schemas import InstanceCard
-from flowtrack.models import Instance, Role
+from flowtrack.models import Instance, InstanceEvent, Role
+from flowtrack.models.instance_event import InstanceEventType
 
 router = APIRouter(prefix="/api/instances", tags=["instances"])
 
@@ -47,3 +50,38 @@ def list_instances(
         )
         for inst in db.scalars(stmt)
     ]
+
+
+@router.post("/{instance_id}/hook", status_code=status.HTTP_202_ACCEPTED)
+async def receive_hook(
+    instance_id: UUID,
+    request: Request,
+    name: str = Query(..., description="Hook name (Stop, SubagentStop, etc.)"),
+    db: Session = Depends(db_session),
+) -> dict:
+    """Callback from a Claude Code hook running inside a spawned worktree.
+
+    The hook's stdin (forwarded by Claude) is captured verbatim into the event
+    payload so we can correlate with stream-json later. Always 202 — Claude
+    doesn't care about our response, only that we accepted.
+    """
+    inst = db.get(Instance, instance_id)
+    if inst is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"instance {instance_id} not found")
+
+    raw = await request.body()
+    payload_text = raw.decode("utf-8", "replace") if raw else ""
+    payload = {"hook_name": name, "raw": payload_text[:4000]}  # cap to keep DB tidy
+
+    db.add(InstanceEvent(
+        instance_id=instance_id,
+        event_type=InstanceEventType.HEARTBEAT,
+        payload_json=payload,
+    ))
+    inst.last_heartbeat_at = datetime.now(tz=timezone.utc)
+
+    broker.publish_sync("hook_received", {
+        "instance_id": str(instance_id),
+        "hook": name,
+    })
+    return {"accepted": True}

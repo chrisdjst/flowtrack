@@ -28,13 +28,14 @@ from sqlalchemy.orm import Session
 
 from sqlalchemy import select
 
+from flowtrack.api.events import broker
 from flowtrack.core.database import SessionLocal
 from flowtrack.core.settings import settings
 from flowtrack.models import Instance, Job, Role, Task, TaskTransition
 from flowtrack.models.instance import InstanceStatus
 from flowtrack.models.job import JobStatus
 from flowtrack.models.task import TaskStatus
-from flowtrack.orchestrator import locks, worktree
+from flowtrack.orchestrator import hooks, locks, worktree
 from flowtrack.orchestrator.queue import release_job
 from flowtrack.orchestrator.stream_parser import consume_stream
 
@@ -111,9 +112,24 @@ async def _supervise_inner(job_id: UUID, instance_id: UUID) -> None:
         _mark_running, instance_id, wt_path=str(wt_path), branch=ctx.branch_name
     )
 
+    # 4b. Drop a .claude/settings.json with hooks that callback the daemon.
+    api_base_url = f"http://{settings.api_host}:{settings.api_port}"
+    try:
+        await asyncio.to_thread(
+            hooks.write_worktree_settings,
+            worktree_path=wt_path,
+            instance_id=instance_id,
+            api_base_url=api_base_url,
+        )
+    except Exception:
+        log.warning(
+            "failed to write hook settings for instance %s — continuing without hooks",
+            instance_id, exc_info=True,
+        )
+
     # 5. Spawn subprocess.
     cmd = _build_command(ctx)
-    env = _build_env()
+    env = _build_env(instance_id=instance_id)
     log.info("spawning instance %s: %s", instance_id, " ".join(cmd))
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -224,12 +240,14 @@ def _finalize(
     exit_code: int | None,
     error: str | None,
 ) -> None:
+    task_id_for_event: UUID | None = None
     with _db() as db:
         inst = db.get(Instance, instance_id)
         if inst is not None:
             inst.status = inst_status
             inst.exit_code = exit_code
             inst.finished_at = datetime.now(tz=timezone.utc)
+            task_id_for_event = inst.task_id
         locks.release_all(db, instance_id=instance_id)
         job = db.get(Job, job_id)
         if job is not None:
@@ -238,6 +256,14 @@ def _finalize(
         # Failure path stays put — caller can re-enqueue manually after triage.
         if inst_status == InstanceStatus.COMPLETED and inst is not None and inst.task_id:
             _advance_pipeline(db, task_id=inst.task_id, instance_id=instance_id, role_id=inst.role_id)
+
+    broker.publish_sync("instance_finalized", {
+        "instance_id": str(instance_id),
+        "status": inst_status.value,
+        "exit_code": exit_code,
+        "error": error,
+        "task_id": str(task_id_for_event) if task_id_for_event else None,
+    })
 
 
 def _advance_pipeline(
@@ -272,6 +298,13 @@ def _advance_pipeline(
                 instance_id=instance_id,
                 reason=f"pipeline: {role.name} completed",
             ))
+            broker.publish_sync("task_transitioned", {
+                "task_id": str(task.id),
+                "from_status": from_status,
+                "to_status": new_status.value,
+                "by_role": role.name,
+                "instance_id": str(instance_id),
+            })
 
     if role.next_role_name:
         next_role = db.scalar(select(Role).where(Role.name == role.next_role_name))
@@ -282,7 +315,12 @@ def _advance_pipeline(
             )
             return
         db.add(Job(task_id=task.id, role_id=next_role.id, priority=100))
-        log.info("pipeline: %s → %s enqueued for task %s", role.name, next_role.name, task.id)
+        log.info("pipeline: %s -> %s enqueued for task %s", role.name, next_role.name, task.id)
+        broker.publish_sync("job_enqueued", {
+            "task_id": str(task.id),
+            "role_name": next_role.name,
+            "from_role": role.name,
+        })
 
 
 def _finalize_failed(instance_id: UUID, job_id: UUID, error: str) -> None:
@@ -342,12 +380,13 @@ def _build_prompt(ctx: _SpawnContext) -> str:
     return "\n".join(parts)
 
 
-def _build_env() -> dict[str, str]:
+def _build_env(*, instance_id: UUID) -> dict[str, str]:
     env = dict(os.environ)
     if settings.anthropic_api_key:
         env["ANTHROPIC_API_KEY"] = settings.anthropic_api_key
     # Used by hooks inside the worktree to call back into the daemon.
     env["FLOWTRACK_API_URL"] = f"http://{settings.api_host}:{settings.api_port}"
+    env["FLOWTRACK_INSTANCE_ID"] = str(instance_id)
     return env
 
 

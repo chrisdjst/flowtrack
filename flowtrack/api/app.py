@@ -15,8 +15,9 @@ import logging
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
+from flowtrack.api.events import broker
 from flowtrack.api.routers import instances, kanban, tasks
 from flowtrack.core.settings import settings
 from flowtrack.orchestrator.loop import run_orchestrator
@@ -37,6 +38,7 @@ async def lifespan(app: FastAPI):
     bg_tasks = [
         asyncio.create_task(run_orchestrator(stop_event), name="orchestrator-loop"),
         asyncio.create_task(run_watchdog(stop_event), name="watchdog"),
+        asyncio.create_task(broker.run_broadcaster(stop_event), name="ws-broadcaster"),
     ]
     try:
         yield
@@ -68,6 +70,25 @@ app.include_router(instances.router)
 @app.get("/healthz", tags=["meta"])
 def healthz() -> dict:
     return {"status": "ok", "dry_run": settings.orchestrator_dry_run}
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket) -> None:
+    """Live event stream for the kanban frontend.
+
+    No auth yet — bind to 127.0.0.1 in production until that ships. The
+    server never expects client → server messages; reading just keeps the
+    connection alive until close.
+    """
+    await ws.accept()
+    await broker.add(ws)
+    try:
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await broker.remove(ws)
 
 
 def run() -> None:

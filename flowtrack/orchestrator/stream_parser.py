@@ -19,6 +19,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from flowtrack.api.events import broker
 from flowtrack.core.database import SessionLocal
 from flowtrack.models import Instance, InstanceEvent
 from flowtrack.models.instance_event import InstanceEventType
@@ -101,8 +102,32 @@ def _persist_event(
             )
 
         db.commit()
+
+        broker.publish_sync("instance_event", {
+            "instance_id": str(instance_id),
+            "event_type": event_type.value,
+            "tokens_input": instance.tokens_input,
+            "tokens_output": instance.tokens_output,
+            "cost_usd": str(instance.cost_usd),
+            "summary": _event_summary(event_type, payload),
+        })
     except Exception:
         db.rollback()
         log.exception("failed to persist event for instance %s", instance_id)
     finally:
         db.close()
+
+
+def _event_summary(event_type: InstanceEventType, payload: dict) -> str:
+    """Short, UI-friendly description of the event. Used by the kanban cards."""
+    if event_type == InstanceEventType.TOOL_USE:
+        return f"tool: {payload.get('tool', '?')}"
+    if event_type == InstanceEventType.USAGE:
+        return f"+{payload.get('input_tokens', 0)}/{payload.get('output_tokens', 0)} tok"
+    if event_type == InstanceEventType.RESULT:
+        return f"result: {payload.get('exit_reason', 'unknown')}"
+    if event_type == InstanceEventType.ERROR:
+        return "error"
+    if event_type == InstanceEventType.THINKING:
+        return "thinking"
+    return event_type.value
