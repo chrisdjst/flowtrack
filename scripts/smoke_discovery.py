@@ -80,7 +80,7 @@ async def main() -> int:
     # Run twice — second should be a no-op (idempotent).
     first = await asyncio.to_thread(_run_source, source)
     second = await asyncio.to_thread(_run_source, source)
-    print(f"first run added: {first}; second run added: {second} (expect 2 then 0)")
+    print(f"first run added: {len(first)}; second run added: {len(second)} (expect 2 then 0)")
 
     # Quickly stand up the API so we can hit /api/discovery.
     port = _free_port()
@@ -143,8 +143,8 @@ async def main() -> int:
         print(f"item.promoted_task_id= {item.promoted_task_id}")
 
         ok = (
-            first == 2
-            and second == 0
+            len(first) == 2
+            and len(second) == 0
             and len(ours) >= 2  # could be more if other smokes seeded items
             and r2.status_code == 409
             and task.discovered_from == item.id

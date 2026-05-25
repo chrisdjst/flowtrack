@@ -22,6 +22,23 @@ const COLUMNS = [
 
 const $ = (id) => document.getElementById(id);
 
+// Optional bearer token. Picked up from ?token=... in the URL on first load
+// and stashed in sessionStorage so refreshes don't lose it. Cleared by
+// reloading the page with ?token= (empty).
+const _qsToken = new URLSearchParams(location.search).get("token");
+if (_qsToken !== null) {
+  if (_qsToken === "") sessionStorage.removeItem("flowtrack_token");
+  else sessionStorage.setItem("flowtrack_token", _qsToken);
+}
+const TOKEN = sessionStorage.getItem("flowtrack_token") || "";
+
+function authedFetch(url, opts = {}) {
+  if (!TOKEN) return fetch(url, opts);
+  const headers = new Headers(opts.headers || {});
+  headers.set("Authorization", `Bearer ${TOKEN}`);
+  return fetch(url, { ...opts, headers });
+}
+
 const state = {
   board: null,
   instanceSummary: new Map(), // instance_id -> latest event summary text
@@ -87,6 +104,8 @@ function discoveryCard(d) {
 function renderInstances(list) {
   const root = $("instances-list");
   $("instances-count").textContent = `${list.length} instance${list.length === 1 ? "" : "s"}`;
+  const sectionCount = $("instances-section-count");
+  if (sectionCount) sectionCount.textContent = list.length;
   root.innerHTML = "";
   if (list.length === 0) {
     root.innerHTML = `<li class="empty">no live instances</li>`;
@@ -126,11 +145,143 @@ function escape(s) {
   }[c]));
 }
 
+// ---------- discovery inbox ----------
+
+function renderDiscovery(items) {
+  const root = $("discovery-list");
+  $("discovery-count").textContent = items.length;
+  root.innerHTML = "";
+  if (items.length === 0) {
+    root.innerHTML = `<li class="empty">no new items</li>`;
+    return;
+  }
+  for (const item of items) {
+    const li = document.createElement("li");
+    li.className = "discovery-row";
+    li.dataset.itemId = item.id;
+    const score = item.signal_score != null ? ` · score ${item.signal_score}` : "";
+    li.innerHTML = `
+      <div class="title">${escape(item.title)}</div>
+      <div class="meta">
+        <span class="src">${escape(item.source)}/${escape(item.source_ref || "")}</span>
+        <span>${escape(item.kind)}</span>
+        <span>${score}</span>
+      </div>
+      <div class="actions">
+        <button class="primary" data-action="promote">Promote</button>
+        <button data-action="refine">Refine (PM)</button>
+        <button class="danger" data-action="reject">Reject</button>
+      </div>
+    `;
+    li.querySelectorAll("button").forEach((btn) => {
+      btn.addEventListener("click", (e) => handleDiscoveryAction(item, btn, e));
+    });
+    root.appendChild(li);
+  }
+}
+
+async function handleDiscoveryAction(item, btn, _ev) {
+  const action = btn.dataset.action;
+  const buttons = btn.parentElement.querySelectorAll("button");
+  buttons.forEach((b) => (b.disabled = true));
+  try {
+    const r = await authedFetch(`/api/discovery/${item.id}/${action}`, { method: "POST" });
+    if (action === "refine") {
+      const data = await r.json();
+      alert(
+        `Recommendation: ${data.recommendation}\n` +
+        `Module hint: ${data.module_hint ?? "(none)"}\n` +
+        `Cost: $${data.cost_usd}\n\n` +
+        `Acceptance criteria:\n${data.acceptance_criteria}`
+      );
+    }
+    if (!r.ok) {
+      const body = await r.text();
+      alert(`${action} failed (${r.status}): ${body}`);
+    }
+  } catch (e) {
+    alert(`${action} error: ${e.message}`);
+  } finally {
+    buttons.forEach((b) => (b.disabled = false));
+    refreshDiscovery();
+    scheduleRefresh(100);
+  }
+}
+
+async function refreshDiscovery() {
+  try {
+    const r = await authedFetch("/api/discovery");
+    if (!r.ok) return;
+    renderDiscovery(await r.json());
+  } catch (e) {
+    console.error("discovery fetch failed", e);
+  }
+}
+
+// ---------- budget ----------
+
+function renderBudget(snapshot) {
+  const root = $("budget-windows");
+  const sectionStatus = $("budget-section-status");
+  if (!snapshot) {
+    root.innerHTML = `<div class="empty">no data</div>`;
+    sectionStatus.textContent = "—";
+    return;
+  }
+  const hour = snapshot.hour || {};
+  const day = snapshot.day || {};
+  const caps = snapshot.caps || {};
+  const hourUsed = parseFloat(hour.cost_usd || "0");
+  const dayUsed = parseFloat(day.cost_usd || "0");
+  const dayCap = parseFloat(caps.day_usd || 0);
+  const hourCap = parseFloat(caps.hour_usd || 0);
+
+  // Header badge
+  const badge = $("budget-badge");
+  let badgeClass = "budget-ok";
+  if (snapshot.blocked) badgeClass = "budget-bad";
+  else if (dayCap > 0 && dayUsed / dayCap > 0.8) badgeClass = "budget-warn";
+  badge.className = badgeClass;
+  badge.textContent =
+    dayCap > 0
+      ? `$${dayUsed.toFixed(4)} / $${dayCap.toFixed(2)}/day`
+      : `$${dayUsed.toFixed(4)} (no cap)`;
+
+  // Side panel detail
+  let html = "";
+  if (snapshot.blocked) {
+    html += `<div class="blocked-banner">BUDGET BLOCKED: ${escape(snapshot.reason || "")}</div>`;
+  }
+  for (const [k, label] of [["hour", "Hour"], ["day", "Day"], ["month", "Month"]]) {
+    const w = snapshot[k] || {};
+    const cap = caps[`${k}_usd`];
+    html += `
+      <div class="budget-window">
+        <span class="label">${label}</span>
+        <span class="value">$${parseFloat(w.cost_usd || "0").toFixed(4)}</span>
+        <span class="cap">${cap ? `/ $${cap}` : "no cap"}</span>
+      </div>
+    `;
+  }
+  root.innerHTML = html;
+  sectionStatus.textContent = snapshot.blocked ? "blocked" : `$${dayUsed.toFixed(2)}`;
+}
+
+async function refreshBudget() {
+  try {
+    const r = await authedFetch("/api/budget");
+    if (!r.ok) return;
+    renderBudget(await r.json());
+  } catch (e) {
+    console.error("budget fetch failed", e);
+  }
+}
+
 // ---------- data ----------
 
 async function refresh() {
   try {
-    const r = await fetch("/api/kanban");
+    const r = await authedFetch("/api/kanban");
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const board = await r.json();
     state.board = board;
@@ -139,6 +290,8 @@ async function refresh() {
   } catch (e) {
     console.error("refresh failed", e);
   }
+  refreshDiscovery();
+  refreshBudget();
 }
 
 let refreshScheduled = null;
@@ -160,7 +313,11 @@ function setConnState(on, label) {
 function setLastEvent(text) { $("last-event").textContent = text; }
 
 function connectWS() {
-  const url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws";
+  // Browsers don't support custom headers on WebSocket — pass the token as a
+  // query parameter when auth is configured. Server's check_websocket_token
+  // accepts either.
+  let url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws";
+  if (TOKEN) url += `?token=${encodeURIComponent(TOKEN)}`;
   const ws = new WebSocket(url);
 
   ws.onopen = () => setConnState(true, "live");
@@ -180,18 +337,31 @@ function connectWS() {
       case "instance_event":
         if (p.instance_id && p.summary) {
           state.instanceSummary.set(p.instance_id, p.summary);
-          // re-render instances cheaply
           if (state.board) renderInstances(state.board.active_instances || []);
         }
+        // Usage events shift the budget — refresh that panel.
+        if (p.event_type === "usage" || p.event_type === "result") refreshBudget();
         break;
       case "task_transitioned":
         scheduleRefresh(100);
         if (p.task_id) flashCard(p.task_id);
         break;
       case "instance_finalized":
+        scheduleRefresh(100);
+        refreshBudget();
+        break;
       case "job_enqueued":
       case "hook_received":
+      case "reviewer_request_changes":
+      case "reviewer_needs_human":
         scheduleRefresh(100);
+        break;
+      case "discovered_item_added":
+      case "discovered_item_promoted":
+      case "discovered_item_rejected":
+      case "discovered_item_refined":
+        refreshDiscovery();
+        scheduleRefresh(150);
         break;
     }
   };

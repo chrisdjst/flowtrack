@@ -80,7 +80,7 @@ async def main() -> int:
     source = SentryIssuesSource()
     first = await asyncio.to_thread(_run_source, source)
     second = await asyncio.to_thread(_run_source, source)
-    print(f"first run added: {first}; second: {second} (expect 2 then 0; tiny dropped)")
+    print(f"first run added: {len(first)}; second: {len(second)} (expect 2 then 0; tiny dropped)")
 
     db = SessionLocal()
     try:
@@ -101,8 +101,8 @@ async def main() -> int:
         print(f"  C tiny (count=1)      -> present? {tiny is not None}  (expect False)")
 
         ok = (
-            first == 2
-            and second == 0
+            len(first) == 2
+            and len(second) == 0
             and bug is not None and bug.kind == DiscoveryKind.BUG
             and warn is not None and warn.kind == DiscoveryKind.INCIDENT
             and int(warn.signal_score) == 999       # clamped

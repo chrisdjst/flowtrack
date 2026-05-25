@@ -16,6 +16,8 @@
       <span class="sep">|</span>
       <span id="instances-count">0 instances</span>
       <span class="sep">|</span>
+      <span id="budget-badge" class="budget-ok">$0 / —</span>
+      <span class="sep">|</span>
       <span id="last-event">no events yet</span>
     </div>
   </header>
@@ -23,9 +25,30 @@
   <main>
     <section id="board"></section>
 
-    <aside id="instances-panel">
-      <h2>Active instances</h2>
-      <ul id="instances-list"></ul>
+    <aside id="side-panel">
+      <details id="discovery-panel" open>
+        <summary>
+          <span class="panel-title">Discovery inbox</span>
+          <span id="discovery-count" class="panel-count">0</span>
+        </summary>
+        <ul id="discovery-list"></ul>
+      </details>
+
+      <details id="instances-section" open>
+        <summary>
+          <span class="panel-title">Active instances</span>
+          <span id="instances-section-count" class="panel-count">0</span>
+        </summary>
+        <ul id="instances-list"></ul>
+      </details>
+
+      <details id="budget-section">
+        <summary>
+          <span class="panel-title">Budget</span>
+          <span id="budget-section-status" class="panel-count">—</span>
+        </summary>
+        <div id="budget-windows"></div>
+      </details>
     </aside>
   </main>
 

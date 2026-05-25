@@ -21,6 +21,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from flowtrack.api.auth import BearerAuthMiddleware, check_websocket_token
 from flowtrack.api.events import broker
 from flowtrack.api.routers import budget, discovery, instances, kanban, tasks
 from flowtrack.core.sentry import init_sentry
@@ -71,6 +72,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Auth middleware. No-op when api_token is empty.
+app.add_middleware(BearerAuthMiddleware)
+
 app.include_router(kanban.router)
 app.include_router(tasks.router)
 app.include_router(instances.router)
@@ -114,10 +118,15 @@ def _sentry_test() -> dict:
 async def websocket_endpoint(ws: WebSocket) -> None:
     """Live event stream for the kanban frontend.
 
-    No auth yet — bind to 127.0.0.1 in production until that ships. The
-    server never expects client → server messages; reading just keeps the
-    connection alive until close.
+    When ``settings.api_token`` is set, the client must pass it as
+    ``Authorization: Bearer <token>`` OR ``?token=<token>`` (browsers don't
+    let you set headers on WebSocket; query param is the escape hatch).
+
+    The server never expects client -> server messages; reading just keeps
+    the connection alive until close.
     """
+    if not await check_websocket_token(ws):
+        return
     await ws.accept()
     await broker.add(ws)
     try:

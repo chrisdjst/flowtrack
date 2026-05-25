@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     # ----- Orchestrator -----
     api_host: str = "127.0.0.1"
     api_port: int = 8080
+    # Bearer token for /api/* and /ws. Empty = no auth (localhost-only).
+    api_token: str = ""
     # Dry run: orchestrator claims jobs from queue but does not spawn Claude Code.
     # Useful for verifying queue/locks/budget plumbing without burning tokens.
     orchestrator_dry_run: bool = True
@@ -43,6 +45,12 @@ class Settings(BaseSettings):
     jira_discovery_label: str = "auto"
     # Discovery: GitHub issue label that opts an issue into auto-discovery.
     github_discovery_label: str = "bot-pickup"
+
+    # When true, every new discovered_item the manager persists triggers a
+    # background PM refinement. If the PM recommends 'promote', a Task is
+    # auto-created and the item is marked promoted. If 'reject', item is
+    # marked rejected. Off by default — refinement spends money per item.
+    auto_refine_discovered: bool = False
 
     # ----- Sentry as a DISCOVERY source (distinct from sentry_dsn above) -----
     # API token for reading issues. Different from DSN; needs scopes:

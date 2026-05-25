@@ -31,8 +31,9 @@ from sqlalchemy import select
 from flowtrack.api.events import broker
 from flowtrack.core.database import SessionLocal
 from flowtrack.core.settings import settings
-from flowtrack.models import Instance, Job, Role, Task, TaskTransition
+from flowtrack.models import Instance, InstanceEvent, Job, Role, Task, TaskComment, TaskTransition
 from flowtrack.models.instance import InstanceStatus
+from flowtrack.models.instance_event import InstanceEventType
 from flowtrack.models.job import JobStatus
 from flowtrack.models.task import TaskStatus
 from flowtrack.orchestrator import hooks, locks, worktree
@@ -279,6 +280,141 @@ def _finalize(
     })
 
 
+def _send_back_to_dev(
+    db: Session, *, task: Task, role: Role, instance_id: UUID
+) -> None:
+    """Reviewer rejected: route the task back to dev with the reviewer's
+    parent_branch so dev's next worktree sees what was reviewed.
+
+    Records a transition + a comment + a new dev Job. Stays in the same
+    worker lane via inst.worker_id propagation.
+    """
+    inst = db.get(Instance, instance_id)
+    dev_role = db.scalar(select(Role).where(Role.name == "dev"))
+    if dev_role is None:
+        log.warning("reviewer wants changes but no 'dev' role found — falling back to blocked")
+        _block_for_human(db, task=task, role=role, instance_id=instance_id)
+        return
+
+    from_status = task.status.value if task.status else None
+    task.status = TaskStatus.IN_PROGRESS
+    db.add(TaskTransition(
+        task_id=task.id, from_status=from_status, to_status=task.status.value,
+        instance_id=instance_id, reason="reviewer: REQUEST_CHANGES",
+    ))
+    db.add(TaskComment(
+        task_id=task.id,
+        body="Reviewer requested changes. Sending back to dev. See instance events for the reviewer's comments.",
+        author_role_id=role.id, instance_id=instance_id,
+    ))
+    parent_branch = inst.branch_name if inst is not None else None
+    worker_id = inst.worker_id if inst is not None else None
+    db.add(Job(
+        task_id=task.id, role_id=dev_role.id, priority=50,
+        worker_id=worker_id,
+        payload_json={
+            "parent_branch": parent_branch,
+            "reviewer_feedback": "REQUEST_CHANGES — see prior task comments",
+        } if parent_branch else {
+            "reviewer_feedback": "REQUEST_CHANGES — see prior task comments",
+        },
+    ))
+    broker.publish_sync("reviewer_request_changes", {
+        "task_id": str(task.id),
+        "from_role": role.name,
+        "instance_id": str(instance_id),
+    })
+    broker.publish_sync("task_transitioned", {
+        "task_id": str(task.id), "from_status": from_status,
+        "to_status": task.status.value, "by_role": role.name,
+        "instance_id": str(instance_id),
+    })
+
+
+def _block_for_human(
+    db: Session, *, task: Task, role: Role, instance_id: UUID
+) -> None:
+    """Reviewer punted: task -> blocked, comment + WS event for the kanban."""
+    from_status = task.status.value if task.status else None
+    task.status = TaskStatus.BLOCKED
+    db.add(TaskTransition(
+        task_id=task.id, from_status=from_status, to_status=task.status.value,
+        instance_id=instance_id, reason="reviewer: NEEDS_HUMAN",
+    ))
+    db.add(TaskComment(
+        task_id=task.id,
+        body="Reviewer flagged NEEDS_HUMAN. Pipeline halted — human triage required.",
+        author_role_id=role.id, instance_id=instance_id,
+    ))
+    broker.publish_sync("reviewer_needs_human", {
+        "task_id": str(task.id),
+        "from_role": role.name,
+        "instance_id": str(instance_id),
+    })
+    broker.publish_sync("task_transitioned", {
+        "task_id": str(task.id), "from_status": from_status,
+        "to_status": task.status.value, "by_role": role.name,
+        "instance_id": str(instance_id),
+    })
+
+
+def _flatten_text(payload: dict) -> str:
+    """Recursively pull text strings out of a stream-json event payload."""
+    parts: list[str] = []
+
+    def walk(obj):
+        if isinstance(obj, str):
+            parts.append(obj)
+        elif isinstance(obj, dict):
+            # Common shape: {"type": "text", "text": "..."}
+            txt = obj.get("text")
+            if isinstance(txt, str):
+                parts.append(txt)
+            content = obj.get("content")
+            if content is not None:
+                walk(content)
+            message = obj.get("message")
+            if message is not None:
+                walk(message)
+        elif isinstance(obj, list):
+            for child in obj:
+                walk(child)
+    walk(payload)
+    return " ".join(parts)
+
+
+def _reviewer_verdict(db: Session, instance_id: UUID) -> str:
+    """Inspect recent assistant text for a verdict keyword.
+
+    Searches the last ~20 assistant/result/message events for explicit
+    REQUEST_CHANGES / NEEDS_HUMAN / APPROVE. Earlier mentions win — the
+    reviewer prompt asks for the verdict at the end of its work.
+
+    Default when nothing matches: 'needs_human' (fail-safe — the reviewer
+    said nothing actionable, escalate instead of waving through).
+    """
+    rows = list(db.scalars(
+        select(InstanceEvent)
+        .where(InstanceEvent.instance_id == instance_id)
+        .where(InstanceEvent.event_type.in_((
+            InstanceEventType.ASSISTANT,
+            InstanceEventType.RESULT,
+            InstanceEventType.MESSAGE,
+        )))
+        .order_by(InstanceEvent.id.desc())
+        .limit(20)
+    ))
+    for ev in rows:
+        text = _flatten_text(ev.payload_json or {}).upper()
+        if "REQUEST_CHANGES" in text:
+            return "request_changes"
+        if "NEEDS_HUMAN" in text:
+            return "needs_human"
+        if "APPROVE" in text:
+            return "approve"
+    return "needs_human"
+
+
 def _advance_pipeline(
     db: Session, *, task_id: UUID, instance_id: UUID, role_id: UUID
 ) -> None:
@@ -287,11 +423,27 @@ def _advance_pipeline(
     Records a TaskTransition for the status change. If next_role_name points at
     a missing role, logs and stops — does NOT raise (we already committed the
     instance as completed; the chain is best-effort from here).
+
+    Reviewer role is special: its verdict overrides the default chain — see
+    _reviewer_verdict.
     """
     role = db.get(Role, role_id)
     task = db.get(Task, task_id)
     if role is None or task is None:
         return
+
+    # Reviewer branching: override the default in_qa flow based on what the
+    # reviewer wrote. APPROVE keeps the default; the other branches divert.
+    if role.name == "reviewer":
+        verdict = _reviewer_verdict(db, instance_id)
+        log.info("reviewer verdict for task %s: %s", task.id, verdict)
+        if verdict == "request_changes":
+            _send_back_to_dev(db, task=task, role=role, instance_id=instance_id)
+            return
+        if verdict == "needs_human":
+            _block_for_human(db, task=task, role=role, instance_id=instance_id)
+            return
+        # else: fall through to the default approve path below.
 
     if role.task_status_on_success:
         try:

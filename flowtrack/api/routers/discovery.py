@@ -14,9 +14,9 @@ from sqlalchemy.orm import Session
 
 from flowtrack.api.deps import db_session
 from flowtrack.api.events import broker
-from flowtrack.models import DiscoveredItem, Task
+from flowtrack.discovery.promote import promote_item, reject_item
+from flowtrack.models import DiscoveredItem
 from flowtrack.models.discovered_item import DiscoveryStatus
-from flowtrack.models.task import TaskPriority, TaskStatus
 
 router = APIRouter(prefix="/api/discovery", tags=["discovery"])
 
@@ -54,30 +54,14 @@ def promote(item_id: UUID, db: Session = Depends(db_session)) -> dict:
     item = db.get(DiscoveredItem, item_id)
     if item is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"item {item_id} not found")
-    if item.status != DiscoveryStatus.NEW:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            detail=f"item already {item.status.value}",
-        )
-
-    task = Task(
-        title=item.title,
-        description=item.summary,
-        status=TaskStatus.TODO,
-        priority=TaskPriority.MEDIUM,
-        ticket_id=item.source_ref if item.source.value == "jira" else None,
-        discovered_from=item.id,
-    )
-    db.add(task)
-    db.flush()
-
-    item.status = DiscoveryStatus.PROMOTED
-    item.promoted_task_id = task.id
+    try:
+        task = promote_item(db, item)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(e))
 
     # Commit before returning so a subsequent request sees the new state.
-    # The Depends(db_session) cleanup commit runs AFTER the response is
-    # delivered (FastAPI yield-deps semantics), which races with rapid
-    # client retries — manifested as the smoke double-promoting.
+    # Depends(db_session) commit runs AFTER response delivery and races with
+    # rapid retries — see the smoke that previously double-promoted.
     db.commit()
 
     broker.publish_sync("discovered_item_promoted", {
@@ -131,11 +115,9 @@ def reject(item_id: UUID, db: Session = Depends(db_session)) -> dict:
     item = db.get(DiscoveredItem, item_id)
     if item is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"item {item_id} not found")
-    if item.status != DiscoveryStatus.NEW:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            detail=f"item already {item.status.value}",
-        )
-    item.status = DiscoveryStatus.REJECTED
+    try:
+        reject_item(db, item)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(e))
     db.commit()
     return {"ok": True}

@@ -76,7 +76,7 @@ async def main() -> int:
     source = GitHubIssuesSource()
     first = await asyncio.to_thread(_run_source, source)
     second = await asyncio.to_thread(_run_source, source)
-    print(f"first run added: {first}; second: {second} (expect 2 then 0; PR filtered)")
+    print(f"first run added: {len(first)}; second: {len(second)} (expect 2 then 0; PR filtered)")
 
     db = SessionLocal()
     try:
@@ -95,8 +95,8 @@ async def main() -> int:
         print(f"  #{_N_PR} present? {pr is not None} (expect False — PR filtered)")
 
         ok = (
-            first == 2
-            and second == 0
+            len(first) == 2
+            and len(second) == 0
             and bug is not None and bug.kind == DiscoveryKind.BUG
             and feat is not None and feat.kind == DiscoveryKind.FEATURE
             and pr is None

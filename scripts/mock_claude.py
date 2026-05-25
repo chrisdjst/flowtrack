@@ -85,6 +85,16 @@ def main() -> int:
     time.sleep(0.1)
     emit({"type": "tool_use", "tool": "Edit", "params": {"file_path": "noop.txt"}})
     emit({"type": "usage", "input_tokens": 800, "output_tokens": 300})
+
+    # Optional verdict marker — picked up by spawner._reviewer_verdict when
+    # the active role is 'reviewer'. Pipeline smokes set this env to drive
+    # APPROVE / REQUEST_CHANGES / NEEDS_HUMAN branches. Default APPROVE.
+    verdict = os.environ.get("FLOWTRACK_CLAUDE_MOCK_VERDICT", "APPROVE").upper()
+    emit({
+        "type": "message", "role": "assistant",
+        "content": f"Verdict: {verdict}",
+    })
+
     emit({"type": "result", "exit_reason": "end_turn"})
 
     # Simulate the Stop hook firing — what real Claude Code would do via the
