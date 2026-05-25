@@ -22,8 +22,9 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from flowtrack.api.events import broker
-from flowtrack.api.routers import instances, kanban, tasks
+from flowtrack.api.routers import budget, discovery, instances, kanban, tasks
 from flowtrack.core.settings import settings
+from flowtrack.discovery.manager import run_discovery_manager
 from flowtrack.orchestrator.loop import run_orchestrator
 from flowtrack.orchestrator.watchdog import run_watchdog
 
@@ -45,6 +46,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(run_orchestrator(stop_event), name="orchestrator-loop"),
         asyncio.create_task(run_watchdog(stop_event), name="watchdog"),
         asyncio.create_task(broker.run_broadcaster(stop_event), name="ws-broadcaster"),
+        asyncio.create_task(run_discovery_manager(stop_event), name="discovery-manager"),
     ]
     try:
         yield
@@ -71,6 +73,8 @@ app = FastAPI(
 app.include_router(kanban.router)
 app.include_router(tasks.router)
 app.include_router(instances.router)
+app.include_router(budget.router)
+app.include_router(discovery.router)
 
 # Static assets (css/js) under /web/, and the index page at /.
 if _STATIC_DIR.is_dir():

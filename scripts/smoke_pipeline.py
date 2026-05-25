@@ -56,6 +56,16 @@ from flowtrack.models.task import TaskPriority, TaskStatus  # noqa: E402
 from flowtrack.orchestrator.loop import run_orchestrator  # noqa: E402
 
 
+async def _branch_descends_from(child: str, ancestor: str) -> bool:
+    """True iff git considers ``ancestor`` reachable from ``child``."""
+    proc = await asyncio.create_subprocess_exec(
+        "git", "merge-base", "--is-ancestor", ancestor, child,
+        cwd=str(REPO),
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+    )
+    return (await proc.wait()) == 0
+
+
 async def cleanup_worktrees_and_branches() -> None:
     """Best-effort cleanup of all auto/* branches and the worktree dir."""
     proc = await asyncio.create_subprocess_exec(
@@ -169,6 +179,14 @@ async def main() -> int:
         for tr in trans:
             print(f"  {tr.from_status or '-':12s} -> {tr.to_status:12s} reason='{tr.reason}'")
 
+        # Capture branch names for the chaining check (before cleanup).
+        branch_by_role = {roles_by_id[i.role_id]: i.branch_name for i in insts}
+        # Verify chained jobs carry parent_branch in payload_json.
+        chained_jobs = [j for j in jobs if roles_by_id[j.role_id] in ("reviewer", "qa")]
+        chaining_payloads_ok = all(
+            (j.payload_json or {}).get("parent_branch") for j in chained_jobs
+        )
+
         ok = (
             t.status == TaskStatus.DONE
             and len(jobs) == 3
@@ -176,9 +194,24 @@ async def main() -> int:
             and len(insts) == 3
             and all(i.status.value == "completed" for i in insts)
             and len(trans) == 3
+            and chaining_payloads_ok
         )
+        print(f"chaining_payloads_ok = {chaining_payloads_ok}")
     finally:
         db.close()
+
+    # Branch ancestry check: each role's branch should contain the commits of
+    # the previous role. The mock makes one commit per spawn — so qa's branch
+    # must have dev's AND reviewer's commits as ancestors. Done BEFORE cleanup
+    # so the branches still exist.
+    if branch_by_role.get("dev") and branch_by_role.get("reviewer"):
+        ok_chain_dr = await _branch_descends_from(branch_by_role["reviewer"], branch_by_role["dev"])
+        print(f"reviewer descends from dev: {ok_chain_dr}")
+        ok = ok and ok_chain_dr
+    if branch_by_role.get("reviewer") and branch_by_role.get("qa"):
+        ok_chain_rq = await _branch_descends_from(branch_by_role["qa"], branch_by_role["reviewer"])
+        print(f"qa descends from reviewer:  {ok_chain_rq}")
+        ok = ok and ok_chain_rq
 
     await cleanup_worktrees_and_branches()
     print()

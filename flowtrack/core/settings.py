@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     instance_global_max_minutes: int = 120
     # Lock TTL when no explicit role.max_minutes is available.
     lock_default_ttl_minutes: int = 30
+    # Budget caps. Both checked before spawning a new instance — first breach
+    # blocks until the window rolls over. 0 = unlimited (default; opt in).
+    budget_hour_cap_usd: float = 0.0
+    budget_day_cap_usd: float = 0.0
+
+    # Discovery: JQL label tag for Jira backlog discovery source.
+    jira_discovery_label: str = "auto"
     # Isolation lane. Empty = auto-generate "<hostname>:<pid>:<6hex>". When
     # set explicitly, tests / parallel daemons can carve a private queue lane.
     worker_id: str = ""

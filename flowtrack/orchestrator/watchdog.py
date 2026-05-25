@@ -58,11 +58,14 @@ def _sweep_once() -> None:
     db: Session = SessionLocal()
     try:
         killed = _kill_stale_instances(db)
+        recovered = _recover_orphaned_claims(db)
         expired = locks.sweep_expired(db)
         db.commit()
-        if killed or expired:
-            log.info("watchdog sweep: killed=%d stale_instances, expired=%d locks",
-                     killed, expired)
+        if killed or expired or recovered:
+            log.info(
+                "watchdog sweep: killed=%d stale_instances, recovered=%d orphan_claims, "
+                "expired=%d locks", killed, recovered, expired,
+            )
     except Exception:
         db.rollback()
         raise
@@ -119,3 +122,48 @@ def _kill_stale_instances(db: Session) -> int:
             )
         killed += 1
     return killed
+
+
+def _recover_orphaned_claims(db: Session) -> int:
+    """Fail jobs that got claimed but whose supervisor never reached _finalize.
+
+    Two cases this covers:
+      1. ``_claim_one`` crashed between job.status='claimed' and instance.add().
+         Job has claimed_by=NULL but claimed_at is set.
+      2. Instance died without _finalize and watchdog already killed it; the
+         instance is now terminal but the job was somehow not released.
+
+    Threshold: claimed_at older than ``_MIN_STALE_SECONDS``. If the supervisor
+    hasn't progressed within that window, something went wrong.
+    """
+    threshold = datetime.now(tz=timezone.utc) - timedelta(seconds=_MIN_STALE_SECONDS)
+    candidates = list(db.scalars(
+        select(Job).where(
+            Job.status.in_((JobStatus.CLAIMED, JobStatus.RUNNING)),
+            Job.claimed_at.isnot(None),
+            Job.claimed_at < threshold,
+        )
+    ))
+    recovered = 0
+    for job in candidates:
+        # If there is an instance and it's still live, leave it alone — the
+        # instance sweep will handle it on this or a later tick.
+        if job.claimed_by is not None:
+            inst = db.get(Instance, job.claimed_by)
+            if inst is not None and inst.status in (
+                InstanceStatus.SPAWNING,
+                InstanceStatus.RUNNING,
+                InstanceStatus.WAITING_INPUT,
+            ):
+                continue
+        log.warning(
+            "watchdog: recovering orphaned job %s (claimed_at=%s, claimed_by=%s)",
+            job.id, job.claimed_at, job.claimed_by,
+        )
+        release_job(
+            db, job, final_status=JobStatus.FAILED,
+            error="watchdog: orphaned claim",
+            instance_id=None,
+        )
+        recovered += 1
+    return recovered

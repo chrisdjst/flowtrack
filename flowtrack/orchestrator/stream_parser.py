@@ -23,6 +23,7 @@ from flowtrack.api.events import broker
 from flowtrack.core.database import SessionLocal
 from flowtrack.models import Instance, InstanceEvent
 from flowtrack.models.instance_event import InstanceEventType
+from flowtrack.orchestrator import budget
 from flowtrack.orchestrator.pricing import cost_for
 
 log = logging.getLogger(__name__)
@@ -95,10 +96,16 @@ def _persist_event(
         if event_type == InstanceEventType.USAGE:
             input_tokens = int(payload.get("input_tokens", 0))
             output_tokens = int(payload.get("output_tokens", 0))
+            delta_cost = cost_for(
+                model, input_tokens=input_tokens, output_tokens=output_tokens
+            )
             instance.tokens_input += input_tokens
             instance.tokens_output += output_tokens
-            instance.cost_usd = (instance.cost_usd or 0) + cost_for(
-                model, input_tokens=input_tokens, output_tokens=output_tokens
+            instance.cost_usd = (instance.cost_usd or 0) + delta_cost
+            # Aggregate into hour/day/month budget windows so the loop's
+            # circuit breaker can see live spend across all instances.
+            budget.record_usage(
+                db, cost_usd=delta_cost, tokens=input_tokens + output_tokens,
             )
 
         db.commit()

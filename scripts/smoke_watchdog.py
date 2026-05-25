@@ -90,10 +90,34 @@ async def main() -> int:
             priority=10,
         )
         db.add(job)
+        # Orphan-claim scenario: a job CLAIMED long ago with NO instance row.
+        # Simulates _claim_one crashing between job.status='claimed' and
+        # instance.add(). Watchdog must recover this independently.
+        orphan_task = Task(
+            title="Orphan claim",
+            status=TaskStatus.IN_PROGRESS,
+            priority=TaskPriority.HIGH,
+            ticket_id="SMOKE-WD-ORPHAN",
+        )
+        db.add(orphan_task)
+        db.flush()
+        orphan_job = Job(
+            task_id=orphan_task.id,
+            role_id=dev_role.id,
+            status=JobStatus.CLAIMED,
+            attempts=1,
+            claimed_at=ten_hours_ago,
+            claimed_by=None,  # the smoking gun — claimed but no instance
+            priority=10,
+        )
+        db.add(orphan_job)
+
         db.commit()
 
         instance_id, job_id = inst.id, job.id
+        orphan_job_id = orphan_job.id
         print(f"seeded: instance={instance_id} job={job_id} lock={lock.resource_key}")
+        print(f"seeded orphan-claim job: {orphan_job_id}")
     finally:
         db.close()
 
@@ -116,12 +140,18 @@ async def main() -> int:
         print(f"job last_error       = {job.last_error}")
         print(f"lock remaining       = {lock_left}  (expect None)")
 
+        orphan = db.get(Job, orphan_job_id)
+        print(f"orphan job status    = {orphan.status.value}  (expect 'failed')")
+        print(f"orphan job last_error = {orphan.last_error}")
+
         ok = (
             inst.status == InstanceStatus.KILLED
             and inst.finished_at is not None
             and job.status == JobStatus.FAILED
             and (job.last_error or "").startswith("watchdog")
             and lock_left is None
+            and orphan.status == JobStatus.FAILED
+            and "orphaned" in (orphan.last_error or "")
         )
         print()
         print("RESULT:", "PASS" if ok else "FAIL")

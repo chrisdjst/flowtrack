@@ -61,6 +61,10 @@ class _SpawnContext:
     task_acceptance_criteria: str | None
     task_module_hint: str | None
     branch_name: str
+    # Branch to fork the worktree from. "HEAD" for the first role; for chained
+    # roles (reviewer, qa), the previous role's branch so the new agent sees
+    # the prior commits. Read from Job.payload_json.parent_branch.
+    base_branch: str
 
 
 async def supervise(job_id: UUID, instance_id: UUID) -> None:
@@ -91,6 +95,7 @@ async def _supervise_inner(job_id: UUID, instance_id: UUID) -> None:
             worktree_root=worktree_root,
             instance_id=instance_id,
             branch_name=ctx.branch_name,
+            base_branch=ctx.base_branch,
         )
     except worktree.WorktreeError as e:
         log.error("worktree creation failed: %s", e)
@@ -185,6 +190,8 @@ def _load_context(instance_id: UUID, job_id: UUID) -> _SpawnContext | None:
             return None
         short = str(task.id)[:8]
         ishort = str(instance_id)[:8]
+        payload = job.payload_json or {}
+        parent_branch = payload.get("parent_branch")
         return _SpawnContext(
             role_name=role.name,
             role_system_prompt=role.system_prompt,
@@ -198,6 +205,7 @@ def _load_context(instance_id: UUID, job_id: UUID) -> _SpawnContext | None:
             task_acceptance_criteria=task.acceptance_criteria,
             task_module_hint=task.module_hint,
             branch_name=f"auto/{role.name}-{short}-{ishort}",
+            base_branch=parent_branch or "HEAD",
         )
 
 
@@ -318,21 +326,28 @@ def _advance_pipeline(
         # stays in the same lane. Tests rely on this — without it, a chained
         # reviewer job would escape the smoke's lane and a production daemon
         # could claim it.
+        #
+        # Also stash the parent's branch_name in payload_json so the next role's
+        # worktree forks from it (instead of HEAD) and the next agent actually
+        # sees the previous role's commits.
         inst = db.get(Instance, instance_id)
         next_worker_id = inst.worker_id if inst is not None else None
+        parent_branch = inst.branch_name if inst is not None else None
         db.add(Job(
             task_id=task.id,
             role_id=next_role.id,
             priority=100,
             worker_id=next_worker_id,
+            payload_json={"parent_branch": parent_branch} if parent_branch else {},
         ))
-        log.info("pipeline: %s -> %s enqueued for task %s (worker=%s)",
-                 role.name, next_role.name, task.id, next_worker_id)
+        log.info("pipeline: %s -> %s enqueued for task %s (worker=%s, parent_branch=%s)",
+                 role.name, next_role.name, task.id, next_worker_id, parent_branch)
         broker.publish_sync("job_enqueued", {
             "task_id": str(task.id),
             "role_name": next_role.name,
             "from_role": role.name,
             "worker_id": next_worker_id,
+            "parent_branch": parent_branch,
         })
 
 

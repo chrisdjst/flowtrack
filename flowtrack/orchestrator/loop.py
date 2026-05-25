@@ -25,6 +25,7 @@ from flowtrack.core.settings import settings
 from flowtrack.models import Instance, Job
 from flowtrack.models.instance import InstanceStatus
 from flowtrack.models.job import JobStatus
+from flowtrack.orchestrator import budget
 from flowtrack.orchestrator.identity import worker_id
 from flowtrack.orchestrator.queue import claim_next_job, queue_depth, release_job
 from flowtrack.orchestrator.spawner import supervise
@@ -85,6 +86,14 @@ def _claim_one(tick_no: int, heartbeat_every: int) -> tuple[UUID, UUID] | None:
         if tick_no % heartbeat_every == 0:
             depth = queue_depth(db)
             log.info("tick %d alive; queue_depth=%d", tick_no, depth)
+
+        # Budget circuit breaker: don't even claim if we're over cap. Existing
+        # in-flight supervisors keep running; only NEW spawns are gated.
+        blocked, reason = budget.is_blocked(db)
+        if blocked:
+            if tick_no % heartbeat_every == 0:  # don't spam the log
+                log.warning("budget gate: %s — skipping spawn", reason)
+            return None
 
         job = claim_next_job(db)
         if job is None:

@@ -73,6 +73,29 @@ class JiraClient:
         except httpx.HTTPError:
             return None
 
+    def search_issues(self, jql: str, max_results: int = 50) -> list[dict]:
+        """Run a JQL query and return the raw issue payloads. Empty on error.
+
+        Used by the discovery scheduler to pull labeled backlog items. Caller
+        decides what to do with the payload — this method stays Jira-shaped.
+        """
+        creds = self._get_creds()
+        if not self._is_configured(creds):
+            return []
+        url = f"{creds['jira_base_url']}/rest/api/3/search/jql"
+        payload = {
+            "jql": jql,
+            "maxResults": max_results,
+            "fields": ["summary", "description", "priority", "status", "labels", "issuetype"],
+        }
+        try:
+            response = httpx.post(url, json=payload, headers=self._headers(creds), timeout=15)
+            if response.status_code != 200:
+                return []
+            return response.json().get("issues", [])
+        except httpx.HTTPError:
+            return []
+
     def post_comment(self, ticket_id: str, body: str) -> bool:
         creds = self._get_creds()
         if not self._is_configured(creds):
