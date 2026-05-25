@@ -125,7 +125,7 @@ def _kill_stale_instances(db: Session) -> int:
 
 
 def _recover_orphaned_claims(db: Session) -> int:
-    """Fail jobs that got claimed but whose supervisor never reached _finalize.
+    """Recover jobs claimed but whose supervisor never reached _finalize.
 
     Two cases this covers:
       1. ``_claim_one`` crashed between job.status='claimed' and instance.add().
@@ -135,6 +135,11 @@ def _recover_orphaned_claims(db: Session) -> int:
 
     Threshold: claimed_at older than ``_MIN_STALE_SECONDS``. If the supervisor
     hasn't progressed within that window, something went wrong.
+
+    Recovery policy: if ``job.attempts < job.max_attempts``, requeue (status
+    back to QUEUED, clear claimed_*); otherwise fail with a clear reason.
+    Transient supervisor crashes (process killed, host reboot) shouldn't
+    permanently consume a Job slot.
     """
     threshold = datetime.now(tz=timezone.utc) - timedelta(seconds=_MIN_STALE_SECONDS)
     candidates = list(db.scalars(
@@ -156,14 +161,25 @@ def _recover_orphaned_claims(db: Session) -> int:
                 InstanceStatus.WAITING_INPUT,
             ):
                 continue
-        log.warning(
-            "watchdog: recovering orphaned job %s (claimed_at=%s, claimed_by=%s)",
-            job.id, job.claimed_at, job.claimed_by,
-        )
-        release_job(
-            db, job, final_status=JobStatus.FAILED,
-            error="watchdog: orphaned claim",
-            instance_id=None,
-        )
+
+        if job.attempts < job.max_attempts:
+            log.warning(
+                "watchdog: requeueing orphaned job %s (attempt %d/%d, claimed_at=%s)",
+                job.id, job.attempts, job.max_attempts, job.claimed_at,
+            )
+            job.status = JobStatus.QUEUED
+            job.claimed_at = None
+            job.claimed_by = None
+            job.last_error = f"watchdog: requeued after orphaned attempt {job.attempts}"
+        else:
+            log.warning(
+                "watchdog: failing orphaned job %s (attempts exhausted %d/%d)",
+                job.id, job.attempts, job.max_attempts,
+            )
+            release_job(
+                db, job, final_status=JobStatus.FAILED,
+                error=f"watchdog: orphaned claim, attempts exhausted ({job.attempts})",
+                instance_id=None,
+            )
         recovered += 1
     return recovered

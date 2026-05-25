@@ -17,6 +17,7 @@ from flowtrack.api.events import broker
 from flowtrack.core.database import SessionLocal
 from flowtrack.core.settings import settings
 from flowtrack.discovery.base import DiscoveryCandidate, DiscoveryWorker
+from flowtrack.discovery.sources.github_issues import GitHubIssuesSource
 from flowtrack.discovery.sources.jira_backlog import JiraBacklogSource
 from flowtrack.models import DiscoveredItem
 
@@ -32,6 +33,8 @@ def default_sources() -> list[DiscoveryWorker]:
     sources: list[DiscoveryWorker] = []
     if settings.jira_base_url and settings.jira_email and settings.jira_token:
         sources.append(JiraBacklogSource())
+    if settings.github_token and settings.github_owner and settings.github_repo:
+        sources.append(GitHubIssuesSource())
     return sources
 
 

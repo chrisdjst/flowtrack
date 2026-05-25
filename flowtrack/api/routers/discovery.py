@@ -88,6 +88,44 @@ def promote(item_id: UUID, db: Session = Depends(db_session)) -> dict:
     return {"task_id": str(task.id)}
 
 
+@router.post("/{item_id}/refine", status_code=status.HTTP_200_OK)
+async def refine(item_id: UUID, db: Session = Depends(db_session)) -> dict:
+    """Run the PM agent over an item: returns refined criteria + a recommendation.
+
+    Does NOT mutate the item or create a Task — caller decides whether to
+    POST /promote afterwards. Run multiple times if needed; each call costs
+    money so the API is explicit.
+    """
+    from flowtrack.agents.pm import refine_async
+
+    item = db.get(DiscoveredItem, item_id)
+    if item is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"item {item_id} not found")
+    try:
+        result = await refine_async(
+            title=item.title,
+            summary=item.summary,
+            kind=item.kind.value,
+            source=item.source.value,
+            source_ref=item.source_ref or "",
+            raw_payload=item.raw_payload,
+        )
+    except Exception as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=str(e))
+
+    broker.publish_sync("discovered_item_refined", {
+        "item_id": str(item_id),
+        "recommendation": result.recommendation,
+        "cost_usd": str(result.cost_usd),
+    })
+    return {
+        "acceptance_criteria": result.acceptance_criteria,
+        "module_hint": result.module_hint,
+        "recommendation": result.recommendation,
+        "cost_usd": str(result.cost_usd),
+    }
+
+
 @router.post("/{item_id}/reject", status_code=status.HTTP_200_OK)
 def reject(item_id: UUID, db: Session = Depends(db_session)) -> dict:
     item = db.get(DiscoveredItem, item_id)

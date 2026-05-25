@@ -41,6 +41,8 @@ class Settings(BaseSettings):
 
     # Discovery: JQL label tag for Jira backlog discovery source.
     jira_discovery_label: str = "auto"
+    # Discovery: GitHub issue label that opts an issue into auto-discovery.
+    github_discovery_label: str = "bot-pickup"
     # Isolation lane. Empty = auto-generate "<hostname>:<pid>:<6hex>". When
     # set explicitly, tests / parallel daemons can carve a private queue lane.
     worker_id: str = ""
