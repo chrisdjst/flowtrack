@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
+from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -42,11 +43,41 @@ async def consume_stream(
 
     Runs in the asyncio loop; DB writes happen via ``asyncio.to_thread`` so we
     don't stall the event loop on Postgres round-trips.
+
+    ``asyncio.StreamReader.readline`` has a 64KB default buffer limit; a single
+    big system/init event from real Claude Code can exceed that and raise
+    ``LimitOverrunError``. We grow the limit at subprocess-creation time
+    (see spawner) but also fall back to readuntil with a larger cap here in
+    case of latent surprises.
     """
+    line_count = 0
     while True:
-        line = await stream.readline()
-        if not line:
+        try:
+            line = await stream.readline()
+        except asyncio.LimitOverrunError as exc:
+            # Salvage what we can — read until the newline with a bigger budget.
+            log.warning("stream readline overran limit for instance %s; falling back", instance_id)
+            try:
+                line = await stream.readuntil(b"\n")
+            except Exception:
+                # Drop the oversized line, log, continue.
+                await asyncio.to_thread(
+                    _persist_event,
+                    instance_id,
+                    InstanceEventType.ERROR,
+                    {"error": f"readline overrun, salvage failed: {exc}"},
+                    model,
+                )
+                # Skip past the trouble line.
+                await stream.read(exc.consumed)
+                continue
+        except Exception:
+            log.exception("stream read error for instance %s", instance_id)
             return
+        if not line:
+            log.info("stream EOF for instance %s after %d lines", instance_id, line_count)
+            return
+        line_count += 1
         try:
             payload = json.loads(line)
         except json.JSONDecodeError:
@@ -93,20 +124,56 @@ def _persist_event(
         # Every event counts as a heartbeat.
         instance.last_heartbeat_at = datetime.now(tz=timezone.utc)
 
-        if event_type == InstanceEventType.USAGE:
-            input_tokens = int(payload.get("input_tokens", 0))
-            output_tokens = int(payload.get("output_tokens", 0))
+        # Token / cost extraction. Multiple shapes in the wild:
+        #
+        #   mock_claude.py:
+        #     {"type": "usage", "input_tokens": N, "output_tokens": M}
+        #
+        #   real Claude Code (stream-json):
+        #     {"type": "assistant", "message": {..., "usage": {"input_tokens": N,
+        #       "output_tokens": M, ...}}, ...}
+        #     {"type": "result", "usage": {...}, "total_cost_usd": $, ...}
+        #
+        # The `result` event carries authoritative final totals (and a real $
+        # figure from the Anthropic side), so when it's present we set instance
+        # cost from it instead of summing our own pricing estimates.
+        input_tokens, output_tokens = _extract_usage(event_type, payload)
+        result_cost = _extract_result_cost(event_type, payload)
+        result_usage = (
+            payload.get("usage", {}) if event_type == InstanceEventType.RESULT else None
+        )
+
+        if input_tokens or output_tokens:
             delta_cost = cost_for(
-                model, input_tokens=input_tokens, output_tokens=output_tokens
+                model, input_tokens=input_tokens, output_tokens=output_tokens,
             )
             instance.tokens_input += input_tokens
             instance.tokens_output += output_tokens
             instance.cost_usd = (instance.cost_usd or 0) + delta_cost
-            # Aggregate into hour/day/month budget windows so the loop's
-            # circuit breaker can see live spend across all instances.
             budget.record_usage(
                 db, cost_usd=delta_cost, tokens=input_tokens + output_tokens,
             )
+
+        # Result event: overwrite with authoritative totals when supplied.
+        if result_cost is not None or result_usage:
+            if result_usage:
+                # Real Claude sometimes reports zero usage on the result line
+                # itself (the per-turn assistant events already accounted for
+                # it). Only overwrite when result.usage has meaningful values.
+                ri = int(result_usage.get("input_tokens", 0))
+                ro = int(result_usage.get("output_tokens", 0))
+                if ri or ro:
+                    instance.tokens_input = max(instance.tokens_input, ri)
+                    instance.tokens_output = max(instance.tokens_output, ro)
+            if result_cost is not None:
+                # If we've been accumulating estimates, reconcile the diff
+                # into budget_windows so the daemon-wide cap reflects truth.
+                old = Decimal(instance.cost_usd or 0)
+                new = Decimal(str(result_cost))
+                delta = new - old
+                instance.cost_usd = new
+                if delta > 0:
+                    budget.record_usage(db, cost_usd=delta, tokens=0)
 
         db.commit()
 
@@ -125,14 +192,62 @@ def _persist_event(
         db.close()
 
 
+def _extract_usage(
+    event_type: InstanceEventType, payload: dict
+) -> tuple[int, int]:
+    """Return (input_tokens, output_tokens) for events that carry incremental usage.
+
+    Handles the two known shapes (mock flat, real-Claude nested in
+    ``assistant.message.usage``). Returns (0, 0) for events with no usage.
+    """
+    if event_type == InstanceEventType.USAGE:
+        return (
+            int(payload.get("input_tokens", 0)),
+            int(payload.get("output_tokens", 0)),
+        )
+    if event_type == InstanceEventType.ASSISTANT:
+        message = payload.get("message") or {}
+        usage = message.get("usage") or {}
+        return (
+            int(usage.get("input_tokens", 0)),
+            int(usage.get("output_tokens", 0)),
+        )
+    return 0, 0
+
+
+def _extract_result_cost(event_type: InstanceEventType, payload: dict) -> float | None:
+    """Return ``total_cost_usd`` from a result event, or None for other events."""
+    if event_type != InstanceEventType.RESULT:
+        return None
+    raw = payload.get("total_cost_usd")
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _event_summary(event_type: InstanceEventType, payload: dict) -> str:
     """Short, UI-friendly description of the event. Used by the kanban cards."""
     if event_type == InstanceEventType.TOOL_USE:
-        return f"tool: {payload.get('tool', '?')}"
+        # Mock shape has 'tool' at top level; real Claude nests tool_use inside
+        # a content item — fall back to anything resembling a name.
+        return f"tool: {payload.get('tool') or payload.get('name', '?')}"
     if event_type == InstanceEventType.USAGE:
         return f"+{payload.get('input_tokens', 0)}/{payload.get('output_tokens', 0)} tok"
     if event_type == InstanceEventType.RESULT:
-        return f"result: {payload.get('exit_reason', 'unknown')}"
+        subtype = payload.get("subtype")
+        cost = payload.get("total_cost_usd")
+        if cost is not None:
+            return f"result: {subtype or 'success'} (${cost})"
+        return f"result: {subtype or payload.get('exit_reason', 'success')}"
+    if event_type == InstanceEventType.ASSISTANT:
+        return "assistant message"
+    if event_type == InstanceEventType.SYSTEM:
+        return f"system: {payload.get('subtype', 'event')}"
+    if event_type == InstanceEventType.RATE_LIMIT:
+        return "rate limit"
     if event_type == InstanceEventType.ERROR:
         return "error"
     if event_type == InstanceEventType.THINKING:

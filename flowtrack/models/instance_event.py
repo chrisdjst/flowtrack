@@ -17,6 +17,10 @@ class InstanceEventType(str, enum.Enum):
     HEARTBEAT = "heartbeat"
     USAGE = "usage"
     RESULT = "result"
+    # Real Claude Code stream-json variants we want to keep as first-class:
+    SYSTEM = "system"               # init + reinit lifecycle pings
+    ASSISTANT = "assistant"          # streamed assistant message chunks
+    RATE_LIMIT = "rate_limit_event"  # quota / pacing pings from the API
 
 
 class InstanceEvent(Base):

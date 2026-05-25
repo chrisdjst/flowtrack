@@ -136,12 +136,17 @@ async def _supervise_inner(job_id: UUID, instance_id: UUID) -> None:
     cmd = _build_command(ctx)
     env = _build_env(instance_id=instance_id)
     log.info("spawning instance %s: %s", instance_id, " ".join(cmd))
+    # 4MB stdout buffer — the first system/init line from real Claude Code
+    # serialises every available tool + slash command + skill into a single
+    # JSON line and easily exceeds the default 64KB limit. LimitOverrunError
+    # silently kills our consumer task otherwise.
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         cwd=str(wt_path),
         env=env,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        limit=4 * 1024 * 1024,
     )
     await asyncio.to_thread(_attach_pid, instance_id, proc.pid)
 
@@ -384,6 +389,9 @@ def _build_command(ctx: _SpawnContext) -> list[str]:
         *cmd_prefix,
         "--print", prompt,
         "--output-format", "stream-json",
+        # Claude Code refuses to combine --print with --output-format=stream-json
+        # unless --verbose is also set (it gates the streaming output stream).
+        "--verbose",
         "--session-id", str(ctx.task_id),  # any UUID; we don't use it for resume yet
     ]
     if ctx.role_system_prompt:
