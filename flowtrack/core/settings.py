@@ -44,6 +44,21 @@ class Settings(BaseSettings):
     # Discovery: GitHub issue label that opts an issue into auto-discovery.
     github_discovery_label: str = "bot-pickup"
 
+    # ----- Sentry as a DISCOVERY source (distinct from sentry_dsn above) -----
+    # API token for reading issues. Different from DSN; needs scopes:
+    # org:read, project:read, event:read, issue:read.
+    sentry_token: str = ""
+    sentry_org: str = ""        # org SLUG (not numeric id)
+    sentry_project: str = ""    # project SLUG (not numeric id)
+    sentry_api_base: str = "https://sentry.io"
+    # JQL-ish Sentry search query. Tweak to be conservative — every match
+    # becomes a DiscoveryCandidate.
+    sentry_discovery_query: str = "is:unresolved"
+    sentry_discovery_stats_period: str = "24h"
+    # Minimum event_count threshold — drops one-off blips that aren't worth
+    # creating tasks for. 0 = no filter.
+    sentry_min_event_count: int = 5
+
     # ----- Sentry (error monitoring for the daemon itself) -----
     # Set FLOWTRACK_SENTRY_DSN to enable. Empty = Sentry inactive (default).
     sentry_dsn: str = ""

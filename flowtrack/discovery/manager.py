@@ -19,6 +19,7 @@ from flowtrack.core.settings import settings
 from flowtrack.discovery.base import DiscoveryCandidate, DiscoveryWorker
 from flowtrack.discovery.sources.github_issues import GitHubIssuesSource
 from flowtrack.discovery.sources.jira_backlog import JiraBacklogSource
+from flowtrack.discovery.sources.sentry import SentryIssuesSource
 from flowtrack.models import DiscoveredItem
 
 log = logging.getLogger(__name__)
@@ -35,6 +36,8 @@ def default_sources() -> list[DiscoveryWorker]:
         sources.append(JiraBacklogSource())
     if settings.github_token and settings.github_owner and settings.github_repo:
         sources.append(GitHubIssuesSource())
+    if settings.sentry_token and settings.sentry_org and settings.sentry_project:
+        sources.append(SentryIssuesSource())
     return sources
 
 
