@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 
 from flowtrack.api.events import broker
 from flowtrack.api.routers import budget, discovery, instances, kanban, tasks
+from flowtrack.core.sentry import init_sentry
 from flowtrack.core.settings import settings
 from flowtrack.discovery.manager import run_discovery_manager
 from flowtrack.orchestrator.loop import run_orchestrator
@@ -87,7 +88,26 @@ if _STATIC_DIR.is_dir():
 
 @app.get("/healthz", tags=["meta"])
 def healthz() -> dict:
-    return {"status": "ok", "dry_run": settings.orchestrator_dry_run}
+    return {
+        "status": "ok",
+        "dry_run": settings.orchestrator_dry_run,
+        "sentry_active": bool(settings.sentry_dsn),
+        "sentry_environment": settings.sentry_environment,
+    }
+
+
+@app.get("/__sentry_test", include_in_schema=False)
+def _sentry_test() -> dict:
+    """Intentional crash to verify Sentry capture. Disabled in production envs.
+
+    Returns 404 unless ``sentry_environment`` is ``development``. Calling it
+    raises ZeroDivisionError, which Sentry should record as a new event.
+    """
+    from fastapi import HTTPException
+    if settings.sentry_environment == "production":
+        raise HTTPException(404)
+    division_by_zero = 1 / 0  # noqa: F841  (intentional)
+    return {"unreachable": True}
 
 
 @app.websocket("/ws")
@@ -115,6 +135,8 @@ def run() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s | %(message)s",
     )
+    # Sentry first so logging-config above is captured as breadcrumbs.
+    init_sentry()
     uvicorn.run(
         "flowtrack.api.app:app",
         host=settings.api_host,

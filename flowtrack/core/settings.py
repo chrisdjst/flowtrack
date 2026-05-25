@@ -43,6 +43,16 @@ class Settings(BaseSettings):
     jira_discovery_label: str = "auto"
     # Discovery: GitHub issue label that opts an issue into auto-discovery.
     github_discovery_label: str = "bot-pickup"
+
+    # ----- Sentry (error monitoring for the daemon itself) -----
+    # Set FLOWTRACK_SENTRY_DSN to enable. Empty = Sentry inactive (default).
+    sentry_dsn: str = ""
+    sentry_environment: str = "development"
+    sentry_release: str = ""        # commit SHA or version tag
+    # 0.0 = errors only, no perf traces. 0.1 = 10% of transactions traced.
+    sentry_traces_sample_rate: float = 0.0
+    # Send PII (req headers, IPs, user data). False by default for safety.
+    sentry_send_default_pii: bool = False
     # Isolation lane. Empty = auto-generate "<hostname>:<pid>:<6hex>". When
     # set explicitly, tests / parallel daemons can carve a private queue lane.
     worker_id: str = ""
