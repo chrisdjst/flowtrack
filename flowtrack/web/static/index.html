@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>FlowTrack Orchestrator</title>
+  <link rel="stylesheet" href="/web/styles.css">
+</head>
+<body>
+  <header>
+    <h1>FlowTrack Orchestrator</h1>
+    <div id="status">
+      <span id="conn-state" class="off">●</span>
+      <span id="conn-label">connecting...</span>
+      <span class="sep">|</span>
+      <span id="dry-run-badge"></span>
+      <span class="sep">|</span>
+      <span id="instances-count">0 instances</span>
+      <span class="sep">|</span>
+      <span id="budget-badge" class="budget-ok">$0 / —</span>
+      <span class="sep">|</span>
+      <span id="last-event">no events yet</span>
+    </div>
+  </header>
+
+  <main>
+    <section id="board"></section>
+
+    <aside id="side-panel">
+      <details id="discovery-panel" open>
+        <summary>
+          <span class="panel-title">Discovery inbox</span>
+          <span id="discovery-count" class="panel-count">0</span>
+        </summary>
+        <ul id="discovery-list"></ul>
+      </details>
+
+      <details id="instances-section" open>
+        <summary>
+          <span class="panel-title">Active instances</span>
+          <span id="instances-section-count" class="panel-count">0</span>
+        </summary>
+        <ul id="instances-list"></ul>
+      </details>
+
+      <details id="budget-section">
+        <summary>
+          <span class="panel-title">Budget</span>
+          <span id="budget-section-status" class="panel-count">—</span>
+        </summary>
+        <div id="budget-windows"></div>
+      </details>
+    </aside>
+  </main>
+
+  <script src="/web/app.js"></script>
+</body>
+</html>

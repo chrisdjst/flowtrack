@@ -1,7 +1,7 @@
 [project]
 name = "flowtrack"
 version = "0.1.0"
-description = "CLI for capturing SPACE + DORA productivity metrics"
+description = "CLI for capturing SPACE + DORA productivity metrics + multi-instance Claude Code orchestrator"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -13,10 +13,14 @@ dependencies = [
     "pydantic-settings>=2.0.0",
     "psycopg2-binary>=2.9.0",
     "cryptography>=44.0.0",
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.30.0",
+    "sentry-sdk>=2.60.0",
 ]
 
 [project.scripts]
 flowtrack = "flowtrack.main:app"
+flowtrack-server = "flowtrack.api.app:run"
 
 [build-system]
 requires = ["hatchling"]
