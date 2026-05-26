@@ -9,6 +9,7 @@ from flowtrack.core.console import console
 from flowtrack.core.database import get_db
 from flowtrack.core.exceptions import FlowTrackError
 from flowtrack.models.task import TaskPriority, TaskStatus
+from flowtrack.services.orchestrator_service import OrchestratorService, RoleNotFoundError
 from flowtrack.services.task_service import NoActiveTaskError, TaskService
 
 app = typer.Typer(help="Manage tasks.")
@@ -113,21 +114,29 @@ def list_tasks(
             console.print("[dim]No tasks found.[/dim]")
             return
 
+        # Enrich with the role currently working each task (if any).
+        active_roles = OrchestratorService(db).active_roles_for([t.id for t in tasks])
+
         table = Table(title="Tasks", show_header=True)
         table.add_column("ID", style="dim", max_width=8)
         table.add_column("Title", style="bold")
         table.add_column("Status")
         table.add_column("Priority")
+        table.add_column("Role", style="cyan")
+        table.add_column("Module", style="dim")
         table.add_column("Ticket", style="cyan")
 
         for task in tasks:
             s_color = STATUS_COLORS.get(task.status, "white")
             p_color = PRIORITY_COLORS.get(task.priority, "white")
+            role_name = active_roles.get(task.id, "")
             table.add_row(
                 str(task.id)[:8],
                 task.title,
                 f"[{s_color}]{task.status.value}[/{s_color}]",
                 f"[{p_color}]{task.priority.value}[/{p_color}]",
+                f"[green]>{role_name}[/green]" if role_name else "",
+                task.module_hint or "",
                 task.ticket_id or "",
             )
 
@@ -137,14 +146,25 @@ def list_tasks(
 @app.command()
 def update(
     task_id: str = typer.Argument(help="Task ID (first 8 chars or full UUID)"),
-    status: Optional[str] = typer.Option(None, "--status", "-s", help="New status: todo|in_progress|blocked|in_review|done"),
+    status: Optional[str] = typer.Option(None, "--status", "-s", help="New status: todo|in_progress|blocked|in_review|in_qa|done"),
     title: Optional[str] = typer.Option(None, "--title", help="New title"),
     description: Optional[str] = typer.Option(None, "--desc", "-d", help="New description"),
     priority: Optional[str] = typer.Option(None, "--priority", "-p", help="New priority: low|medium|high|urgent"),
+    acceptance_criteria: Optional[str] = typer.Option(
+        None, "--acceptance-criteria", "--criteria", "-a",
+        help="Set the acceptance criteria (required before dev can pick the task up)",
+    ),
+    module_hint: Optional[str] = typer.Option(
+        None, "--module-hint", "-m",
+        help="Module the task touches — used by the orchestrator for resource locking",
+    ),
 ) -> None:
     """Update a task."""
-    if not any([status, title, description, priority]):
-        console.print("[red]Provide at least one option to update (--status, --title, --desc, --priority)[/red]")
+    if not any([status, title, description, priority, acceptance_criteria, module_hint]):
+        console.print(
+            "[red]Provide at least one option to update "
+            "(--status, --title, --desc, --priority, --criteria, --module-hint)[/red]"
+        )
         raise typer.Exit(1)
 
     task_status = None
@@ -170,6 +190,8 @@ def update(
             task = svc.update(
                 full_id, status=task_status, title=title,
                 description=description, priority=task_priority,
+                acceptance_criteria=acceptance_criteria,
+                module_hint=module_hint,
             )
             console.print(f"[green]Task updated[/green] — {task.title}")
             if task_status:
@@ -178,6 +200,48 @@ def update(
             if priority:
                 p_color = PRIORITY_COLORS.get(task.priority, "white")
                 console.print(f"  Priority: [{p_color}]{task.priority.value}[/{p_color}]")
+            if acceptance_criteria is not None:
+                console.print(f"  Acceptance criteria: {task.acceptance_criteria[:80]}...")
+            if module_hint is not None:
+                console.print(f"  Module hint: {task.module_hint}")
+    except FlowTrackError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@app.command()
+def assign(
+    task_id: str = typer.Argument(help="Task ID (first 8 chars or full UUID)"),
+    role_name: str = typer.Argument(help="Role: dev|reviewer|qa|pm|po|design|devops"),
+    priority: int = typer.Option(100, "--priority", "-p", help="Job priority (lower = sooner)"),
+    worker_id: Optional[str] = typer.Option(
+        None, "--worker", "-w",
+        help="Pin job to a specific worker lane (default: any daemon)",
+    ),
+) -> None:
+    """Enqueue a Job: the orchestrator will spawn the given role for this task.
+
+    Useful to drive a task into the dev->reviewer->qa pipeline from the CLI
+    without going through the kanban UI.
+    """
+    try:
+        full_id = _resolve_task_id(task_id)
+        with get_db() as db:
+            svc = OrchestratorService(db)
+            job = svc.assign(full_id, role_name, priority=priority, worker_id=worker_id)
+            console.print(
+                f"[green]Job queued[/green] {str(job.id)[:8]} "
+                f"role=[cyan]{role_name}[/cyan] priority={priority}"
+                + (f" worker=[dim]{worker_id}[/dim]" if worker_id else "")
+            )
+            console.print(
+                "[dim]Tip: GET /api/instances or watch the kanban at http://"
+                "127.0.0.1:8080/ to follow the run.[/dim]"
+            )
+    except RoleNotFoundError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        console.print("[dim]Available roles: dev, reviewer, qa, pm, po, design, devops[/dim]")
+        raise typer.Exit(1)
     except FlowTrackError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
@@ -257,13 +321,17 @@ def comments(
 def show(
     task_id: str = typer.Argument(help="Task ID (first 8 chars or full UUID)"),
 ) -> None:
-    """Show task details with comments."""
+    """Show task details with comments, pipeline transitions, and instances."""
     try:
         full_id = _resolve_task_id(task_id)
         with get_db() as db:
             svc = TaskService(db)
+            orc = OrchestratorService(db)
             task = svc._get_or_raise(full_id)
             task_comments = svc.get_comments(full_id)
+            transitions = orc.transitions_for(full_id)
+            instances = orc.instances_for(full_id)
+            jobs = orc.jobs_for(full_id)
 
             s_color = STATUS_COLORS.get(task.status, "white")
             p_color = PRIORITY_COLORS.get(task.priority, "white")
@@ -280,9 +348,62 @@ def show(
             table.add_row("Priority", f"[{p_color}]{task.priority.value}[/{p_color}]")
             if task.ticket_id:
                 table.add_row("Ticket", task.ticket_id)
+            if task.module_hint:
+                table.add_row("Module hint", task.module_hint)
+            if task.acceptance_criteria:
+                table.add_row("Acceptance criteria", task.acceptance_criteria)
             table.add_row("Created", f"{task.created_at:%Y-%m-%d %H:%M}")
 
             console.print(Panel(table, title="Task Details", expand=False))
+
+            if jobs:
+                console.print()
+                console.print("[bold]Jobs (newest first):[/bold]")
+                jt = Table(show_header=True, box=None, padding=(0, 2))
+                jt.add_column("Role", style="cyan")
+                jt.add_column("Status")
+                jt.add_column("Attempts")
+                jt.add_column("Worker", style="dim")
+                jt.add_column("Created", style="dim")
+                for job, role_name in jobs:
+                    jt.add_row(
+                        role_name,
+                        job.status.value,
+                        str(job.attempts),
+                        job.worker_id or "(any)",
+                        f"{job.created_at:%Y-%m-%d %H:%M}",
+                    )
+                console.print(jt)
+
+            if instances:
+                console.print()
+                console.print("[bold]Instances (newest first):[/bold]")
+                it = Table(show_header=True, box=None, padding=(0, 2))
+                it.add_column("Role", style="cyan")
+                it.add_column("Status")
+                it.add_column("Tokens", style="dim")
+                it.add_column("Cost", style="dim")
+                it.add_column("Spawned", style="dim")
+                for inst, role_name in instances:
+                    it.add_row(
+                        role_name,
+                        inst.status.value,
+                        f"{inst.tokens_input}/{inst.tokens_output}",
+                        f"${inst.cost_usd}",
+                        f"{inst.spawned_at:%H:%M:%S}",
+                    )
+                console.print(it)
+
+            if transitions:
+                console.print()
+                console.print("[bold]Pipeline transitions:[/bold]")
+                for t in transitions:
+                    when = f"{t.transitioned_at:%H:%M:%S}"
+                    reason = f" — {t.reason}" if t.reason else ""
+                    console.print(
+                        f"  [dim]{when}[/dim] "
+                        f"{t.from_status or '-'} -> [cyan]{t.to_status}[/cyan]{reason}"
+                    )
 
             if task_comments:
                 console.print()
@@ -290,8 +411,8 @@ def show(
                 for c in task_comments:
                     jira_tag = " [cyan](jira)[/cyan]" if c.synced_to_jira else ""
                     console.print(f"  [{c.created_at:%Y-%m-%d %H:%M}]{jira_tag} {c.body}")
-            else:
-                console.print("\n[dim]No comments.[/dim]")
+            elif not (jobs or instances or transitions):
+                console.print("\n[dim]No comments, jobs, instances or transitions yet.[/dim]")
     except FlowTrackError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)

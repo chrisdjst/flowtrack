@@ -67,6 +67,15 @@ function renderBoard(board) {
   }
 }
 
+// Roles you can manually dispatch a task to from the UI.
+const ROLE_CHOICES = ["dev", "reviewer", "qa", "pm", "po", "design", "devops"];
+
+// Statuses where "Assign" is meaningful. (Discovery/Refinement live in
+// other columns; Merged is terminal.)
+const ASSIGNABLE_STATUSES = new Set([
+  "todo", "in_progress", "blocked", "in_review", "in_qa",
+]);
+
 function taskCard(t) {
   const el = document.createElement("div");
   el.className = "card";
@@ -75,6 +84,17 @@ function taskCard(t) {
   const module = t.module_hint ? `<span class="module">@${escape(t.module_hint)}</span>` : "";
   const role = t.current_role_name
     ? `<div class="role-badge">${escape(t.current_role_name)}</div>` : "";
+
+  const canAssign = ASSIGNABLE_STATUSES.has(t.status) && t.current_role_name == null;
+  const assignBlock = canAssign
+    ? `
+      <div class="assign-row">
+        <select class="role-pick" title="Pick role">
+          ${ROLE_CHOICES.map((r) => `<option value="${r}">${r}</option>`).join("")}
+        </select>
+        <button class="assign-btn">Assign ▸</button>
+      </div>` : "";
+
   el.innerHTML = `
     <div class="title">${escape(t.title)}</div>
     <div class="meta">
@@ -83,8 +103,40 @@ function taskCard(t) {
       ${module}
     </div>
     ${role}
+    ${assignBlock}
   `;
+
+  if (canAssign) {
+    const select = el.querySelector(".role-pick");
+    const btn = el.querySelector(".assign-btn");
+    btn.addEventListener("click", () => assignTask(t.id, select.value, btn));
+  }
   return el;
+}
+
+async function assignTask(taskId, roleName, btn) {
+  btn.disabled = true;
+  const prev = btn.textContent;
+  btn.textContent = "queuing...";
+  try {
+    const r = await authedFetch(`/api/tasks/${taskId}/assign`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ role_name: roleName, priority: 50 }),
+    });
+    if (!r.ok) {
+      const body = await r.text();
+      alert(`assign failed (${r.status}): ${body}`);
+    } else {
+      btn.textContent = "queued ✓";
+      setTimeout(() => { btn.textContent = prev; btn.disabled = false; }, 1500);
+    }
+  } catch (e) {
+    alert(`assign error: ${e.message}`);
+    btn.disabled = false; btn.textContent = prev;
+  } finally {
+    scheduleRefresh(150);
+  }
 }
 
 function discoveryCard(d) {

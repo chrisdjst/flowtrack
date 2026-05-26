@@ -33,3 +33,5 @@ htmlcov/
 /worktrees/
 /.worktrees/
 /.smoke-worktrees/
+/.demo-worktrees/
+/.real-smoke-worktrees/
