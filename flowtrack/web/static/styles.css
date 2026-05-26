@@ -120,6 +120,33 @@ main {
   margin-top: 4px;
   align-self: flex-start;
 }
+.assign-row {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+}
+.assign-row select {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  border-radius: 3px;
+  padding: 2px 4px;
+}
+.assign-row .assign-btn {
+  background: var(--panel-hover);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 10px;
+  border-radius: 3px;
+  padding: 2px 8px;
+  cursor: pointer;
+  font-family: var(--font-mono);
+}
+.assign-row .assign-btn:hover { border-color: var(--accent); color: var(--accent); }
+.assign-row .assign-btn:disabled { opacity: 0.5; cursor: wait; }
 .card.flash { animation: flash 0.6s ease; }
 @keyframes flash {
   0%   { background: var(--accent); color: #000; }
