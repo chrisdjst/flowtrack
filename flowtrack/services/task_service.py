@@ -101,10 +101,14 @@ class TaskService:
         title: str | None = None,
         description: str | None = None,
         priority: TaskPriority | None = None,
+        acceptance_criteria: str | None = None,
+        module_hint: str | None = None,
     ) -> Task:
         task = self._get_or_raise(task_id)
         return self.repo.update(
-            task, title=title, description=description, status=status, priority=priority,
+            task,
+            title=title, description=description, status=status, priority=priority,
+            acceptance_criteria=acceptance_criteria, module_hint=module_hint,
         )
 
     def list(self, status: TaskStatus | None = None) -> list[Task]:

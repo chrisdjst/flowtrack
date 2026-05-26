@@ -3,6 +3,7 @@ import typer
 from flowtrack.core.sentry import init_sentry
 from flowtrack.cli.block import app as block_app
 from flowtrack.cli.config import app as config_app
+from flowtrack.cli.discovery import app as discovery_app
 from flowtrack.cli.log import app as log_app
 from flowtrack.cli.deploy import app as deploy_app
 from flowtrack.cli.dev import app as dev_app
@@ -30,6 +31,7 @@ app.add_typer(config_app, name="config")
 app.add_typer(status_app, name="status")
 app.add_typer(log_app, name="log")
 app.add_typer(task_app, name="task")
+app.add_typer(discovery_app, name="discovery")
 
 @app.callback()
 def _bootstrap() -> None:

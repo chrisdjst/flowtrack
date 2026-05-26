@@ -43,6 +43,8 @@ class TaskRepository:
         description: str | None = None,
         status: TaskStatus | None = None,
         priority: TaskPriority | None = None,
+        acceptance_criteria: str | None = None,
+        module_hint: str | None = None,
     ) -> Task:
         if title is not None:
             task.title = title
@@ -52,6 +54,10 @@ class TaskRepository:
             task.status = status
         if priority is not None:
             task.priority = priority
+        if acceptance_criteria is not None:
+            task.acceptance_criteria = acceptance_criteria
+        if module_hint is not None:
+            task.module_hint = module_hint
         self.db.flush()
         return task
 
