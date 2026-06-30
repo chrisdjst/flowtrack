@@ -64,6 +64,29 @@ class KanbanBoard(_Base):
     active_instances: list[InstanceCard]
 
 
+class InstanceEventRow(_Base):
+    id: int
+    event_type: str
+    recorded_at: datetime
+    summary: str
+
+
+class TaskDetail(_Base):
+    id: UUID
+    title: str
+    description: str | None
+    acceptance_criteria: str | None
+    status: str
+    priority: str
+    ticket_id: str | None
+    module_hint: str | None
+    created_at: datetime
+    current_instance_id: UUID | None
+    current_role_name: str | None
+    current_instance_status: str | None
+    recent_events: list[InstanceEventRow]
+
+
 class AssignTaskRequest(BaseModel):
     role_name: str
     priority: int = 100
