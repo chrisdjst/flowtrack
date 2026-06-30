@@ -52,6 +52,29 @@
     </aside>
   </main>
 
+  <dialog id="task-modal">
+    <div class="modal-box">
+      <div class="modal-header">
+        <div class="modal-title-group">
+          <div class="modal-title-row">
+            <span id="modal-ticket" class="ticket"></span>
+            <span id="modal-status-badge" class="modal-status"></span>
+          </div>
+          <h2 id="modal-title"></h2>
+        </div>
+        <button id="modal-close" class="modal-close-btn">✕</button>
+      </div>
+      <div id="modal-meta" class="modal-meta"></div>
+      <div id="modal-description" class="modal-section"></div>
+      <div id="modal-acceptance" class="modal-section modal-acceptance"></div>
+      <section id="modal-events-section">
+        <div class="modal-section-title">Live Events</div>
+        <div id="modal-no-instance" class="modal-empty">No active instance</div>
+        <div id="modal-events-log" class="modal-events-log"></div>
+      </section>
+    </div>
+  </dialog>
+
   <script src="/web/app.js"></script>
 </body>
 </html>
