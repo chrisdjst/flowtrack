@@ -153,6 +153,24 @@ main {
   100% { background: var(--bg); color: var(--text); }
 }
 
+.card.card--failed {
+  border-color: var(--err);
+  background: rgba(248, 81, 73, 0.07);
+}
+.card.card--failed:hover { border-color: var(--err); filter: brightness(1.1); }
+.failed-badge {
+  display: inline-flex;
+  align-items: center;
+  background: var(--err);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  align-self: flex-start;
+}
+
 #side-panel {
   display: flex;
   flex-direction: column;

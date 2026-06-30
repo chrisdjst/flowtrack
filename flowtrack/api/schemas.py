@@ -36,6 +36,7 @@ class TaskCard(_Base):
     has_acceptance_criteria: bool  # derived; see kanban router
     current_instance_id: UUID | None  # derived
     current_role_name: str | None  # derived
+    has_failed_instance: bool = False  # derived: last attempt failed and no live instance
     created_at: datetime
 
 
