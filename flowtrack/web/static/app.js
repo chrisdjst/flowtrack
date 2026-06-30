@@ -50,6 +50,13 @@ function renderBoard(board) {
   const root = $("board");
   root.innerHTML = "";
 
+  const failedTaskIds = new Set(
+    (board.active_instances || [])
+      .filter((i) => i.status === "failed" || i.status === "killed")
+      .map((i) => i.task_id)
+      .filter(Boolean)
+  );
+
   for (const [key, label] of COLUMNS) {
     const items = board[key] || [];
     const col = document.createElement("div");
@@ -60,7 +67,11 @@ function renderBoard(board) {
       col.innerHTML += `<div class="empty">empty</div>`;
     } else {
       for (const item of items) {
-        col.appendChild(key === "discovery" ? discoveryCard(item) : taskCard(item));
+        col.appendChild(
+          key === "discovery"
+            ? discoveryCard(item)
+            : taskCard(item, failedTaskIds.has(String(item.id)))
+        );
       }
     }
     root.appendChild(col);
@@ -76,14 +87,15 @@ const ASSIGNABLE_STATUSES = new Set([
   "todo", "in_progress", "blocked", "in_review", "in_qa",
 ]);
 
-function taskCard(t) {
+function taskCard(t, hasFailed = false) {
   const el = document.createElement("div");
-  el.className = "card";
+  el.className = hasFailed ? "card has-failed" : "card";
   el.dataset.taskId = t.id;
   const ticket = t.ticket_id ? `<span class="ticket">${escape(t.ticket_id)}</span>` : "";
   const module = t.module_hint ? `<span class="module">@${escape(t.module_hint)}</span>` : "";
   const role = t.current_role_name
     ? `<div class="role-badge">${escape(t.current_role_name)}</div>` : "";
+  const failedBadge = hasFailed ? `<div class="failed-badge">&#9888; instance failed</div>` : "";
 
   const canAssign = ASSIGNABLE_STATUSES.has(t.status) && t.current_role_name == null;
   const assignBlock = canAssign
@@ -103,6 +115,7 @@ function taskCard(t) {
       ${module}
     </div>
     ${role}
+    ${failedBadge}
     ${assignBlock}
   `;
 
