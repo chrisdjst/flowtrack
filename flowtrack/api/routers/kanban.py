@@ -44,6 +44,16 @@ def get_kanban(db: Session = Depends(db_session)) -> KanbanBoard:
         if inst.task_id is not None:
             instance_by_task[inst.task_id] = inst
 
+    # Task IDs whose most-recent attempt ended in failure (no live retry running).
+    failed_task_ids: set = set(
+        db.scalars(
+            select(Instance.task_id).where(
+                Instance.status.in_([InstanceStatus.FAILED, InstanceStatus.KILLED]),
+                Instance.task_id.isnot(None),
+            )
+        )
+    )
+
     def to_card(t: Task) -> TaskCard:
         inst = instance_by_task.get(t.id)
         role_name = role_by_id[inst.role_id].name if inst is not None else None
@@ -58,6 +68,7 @@ def get_kanban(db: Session = Depends(db_session)) -> KanbanBoard:
             has_acceptance_criteria=t.acceptance_criteria is not None,
             current_instance_id=inst.id if inst else None,
             current_role_name=role_name,
+            has_failed_instance=t.id in failed_task_ids and inst is None,
             created_at=t.created_at,
         )
 
