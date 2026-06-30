@@ -147,6 +147,19 @@ main {
 }
 .assign-row .assign-btn:hover { border-color: var(--accent); color: var(--accent); }
 .assign-row .assign-btn:disabled { opacity: 0.5; cursor: wait; }
+.card.has-failed { border-color: var(--err); }
+.card.has-failed:hover { border-color: #ff7b72; }
+.failed-badge {
+  display: inline-block;
+  background: var(--err);
+  color: #fff;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  align-self: flex-start;
+}
 .card.flash { animation: flash 0.6s ease; }
 @keyframes flash {
   0%   { background: var(--accent); color: #000; }
