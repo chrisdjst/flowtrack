@@ -111,6 +111,13 @@ function taskCard(t) {
     const btn = el.querySelector(".assign-btn");
     btn.addEventListener("click", () => assignTask(t.id, select.value, btn));
   }
+
+  // Open detail modal on card click, but not when interacting with the assign controls.
+  el.addEventListener("click", (e) => {
+    if (e.target.classList.contains("assign-btn") || e.target.classList.contains("role-pick")) return;
+    modal.open(String(t.id));
+  });
+
   return el;
 }
 
@@ -390,6 +397,10 @@ function connectWS() {
         if (p.instance_id && p.summary) {
           state.instanceSummary.set(p.instance_id, p.summary);
           if (state.board) renderInstances(state.board.active_instances || []);
+          // Append to the modal event log if this instance is currently open.
+          if (modal.currentInstanceId === p.instance_id) {
+            modal.appendEvent(p.summary, p.event_type || "event", null);
+          }
         }
         // Usage events shift the budget — refresh that panel.
         if (p.event_type === "usage" || p.event_type === "result") refreshBudget();
@@ -419,9 +430,110 @@ function connectWS() {
   };
 }
 
+// ---------- task detail modal ----------
+
+const modal = {
+  el: null,
+  currentTaskId: null,
+  currentInstanceId: null,
+
+  init() {
+    this.el = $("task-modal");
+    $("modal-close").addEventListener("click", () => this.el.close());
+    // Close when clicking outside the modal box (on backdrop).
+    this.el.addEventListener("click", (e) => {
+      if (e.target === this.el) this.el.close();
+    });
+    // Sync our state when the dialog closes for any reason (Escape, backdrop, button).
+    this.el.addEventListener("close", () => {
+      this.currentTaskId = null;
+      this.currentInstanceId = null;
+    });
+  },
+
+  open(taskId) {
+    this.currentTaskId = taskId;
+    this.currentInstanceId = null;
+    this._setLoading();
+    this.el.showModal();
+    authedFetch(`/api/tasks/${taskId}`)
+      .then((r) => r.json())
+      .then((task) => {
+        if (this.currentTaskId !== taskId) return; // navigated away
+        this.currentInstanceId = task.current_instance_id || null;
+        this._render(task);
+      })
+      .catch((e) => {
+        if (this.currentTaskId === taskId) {
+          $("modal-title").textContent = `Error loading task: ${e.message}`;
+        }
+      });
+  },
+
+  // Called by the WS handler when an instance_event arrives for the open task.
+  appendEvent(summary, eventType, ts) {
+    if (!this.el.open) return;
+    $("modal-no-instance").style.display = "none";
+    const log = $("modal-events-log");
+    log.appendChild(this._makeRow(summary, eventType, ts || new Date().toISOString()));
+    log.scrollTop = log.scrollHeight;
+  },
+
+  _setLoading() {
+    $("modal-title").textContent = "Loading…";
+    $("modal-ticket").textContent = "";
+    $("modal-status-badge").textContent = "";
+    $("modal-meta").innerHTML = "";
+    $("modal-description").textContent = "";
+    $("modal-acceptance").textContent = "";
+    $("modal-events-log").innerHTML = "";
+    $("modal-no-instance").style.display = "block";
+  },
+
+  _render(task) {
+    $("modal-title").textContent = task.title;
+    $("modal-ticket").textContent = task.ticket_id || "";
+    $("modal-status-badge").textContent = task.status.replace(/_/g, " ");
+    $("modal-meta").innerHTML = [
+      `<span class="priority ${task.priority}">${escape(task.priority)}</span>`,
+      task.module_hint ? `<span>@${escape(task.module_hint)}</span>` : "",
+      task.current_role_name
+        ? `<span class="role-badge">${escape(task.current_role_name)}</span>` : "",
+    ].join("");
+    $("modal-description").textContent = task.description || "";
+    $("modal-acceptance").textContent = task.acceptance_criteria || "";
+
+    const log = $("modal-events-log");
+    log.innerHTML = "";
+    if (!task.current_instance_id) {
+      $("modal-no-instance").style.display = "block";
+    } else {
+      $("modal-no-instance").style.display = "none";
+      for (const ev of task.recent_events) {
+        log.appendChild(this._makeRow(ev.summary, ev.event_type, ev.recorded_at));
+      }
+      log.scrollTop = log.scrollHeight;
+    }
+  },
+
+  _makeRow(summary, eventType, ts) {
+    const row = document.createElement("div");
+    row.className = "modal-event-row";
+    const time = new Date(ts).toLocaleTimeString();
+    row.innerHTML = `
+      <span class="ev-time">${escape(time)}</span>
+      <span class="ev-type">${escape(eventType)}</span>
+      <span class="ev-summary">${escape(summary)}</span>
+    `;
+    return row;
+  },
+};
+
 // ---------- bootstrap ----------
 
 (async function init() {
+  modal.init();
+
   try {
     const h = await (await fetch("/healthz")).json();
     const badge = $("dry-run-badge");
