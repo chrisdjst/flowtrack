@@ -79,11 +79,14 @@ const ASSIGNABLE_STATUSES = new Set([
 function taskCard(t) {
   const el = document.createElement("div");
   el.className = "card";
+  if (t.has_failed_instance) el.classList.add("card--failed");
   el.dataset.taskId = t.id;
   const ticket = t.ticket_id ? `<span class="ticket">${escape(t.ticket_id)}</span>` : "";
   const module = t.module_hint ? `<span class="module">@${escape(t.module_hint)}</span>` : "";
   const role = t.current_role_name
     ? `<div class="role-badge">${escape(t.current_role_name)}</div>` : "";
+  const failedBadge = t.has_failed_instance
+    ? `<div class="failed-badge">instance failed</div>` : "";
 
   const canAssign = ASSIGNABLE_STATUSES.has(t.status) && t.current_role_name == null;
   const assignBlock = canAssign
@@ -103,6 +106,7 @@ function taskCard(t) {
       ${module}
     </div>
     ${role}
+    ${failedBadge}
     ${assignBlock}
   `;
 
