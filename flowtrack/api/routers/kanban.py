@@ -9,10 +9,13 @@ from flowtrack.api.schemas import (
     KanbanBoard,
     TaskCard,
 )
-from flowtrack.models import DiscoveredItem, Instance, Role, Task
+from flowtrack.models import DiscoveredItem, Instance, Role, Task, TaskTransition
 from flowtrack.models.discovered_item import DiscoveryStatus
 from flowtrack.models.instance import InstanceStatus
 from flowtrack.models.task import TaskStatus
+from flowtrack.orchestrator.spawner import _AWAIT_APPROVAL_REASON
+
+_FAILED_STATUSES = (InstanceStatus.FAILED, InstanceStatus.KILLED)
 
 router = APIRouter(prefix="/api", tags=["kanban"])
 
@@ -44,6 +47,37 @@ def get_kanban(db: Session = Depends(db_session)) -> KanbanBoard:
         if inst.task_id is not None:
             instance_by_task[inst.task_id] = inst
 
+    # Most recent finished instance per task — used to flag failed cards.
+    from sqlalchemy import func as sqlfunc
+    latest_subq = (
+        select(Instance.task_id, sqlfunc.max(Instance.spawned_at).label("latest"))
+        .where(Instance.finished_at.isnot(None))
+        .group_by(Instance.task_id)
+        .subquery()
+    )
+    failed_task_ids: set = set(db.scalars(
+        select(Instance.task_id)
+        .join(latest_subq, (Instance.task_id == latest_subq.c.task_id) &
+              (Instance.spawned_at == latest_subq.c.latest))
+        .where(Instance.status.in_(_FAILED_STATUSES))
+    ))
+
+    # Tasks in BLOCKED state whose last transition reason is the awaiting-approval sentinel.
+    latest_transition_subq = (
+        select(TaskTransition.task_id, sqlfunc.max(TaskTransition.transitioned_at).label("latest"))
+        .group_by(TaskTransition.task_id)
+        .subquery()
+    )
+    awaiting_approval_task_ids: set = set(db.scalars(
+        select(TaskTransition.task_id)
+        .join(
+            latest_transition_subq,
+            (TaskTransition.task_id == latest_transition_subq.c.task_id) &
+            (TaskTransition.transitioned_at == latest_transition_subq.c.latest),
+        )
+        .where(TaskTransition.reason == _AWAIT_APPROVAL_REASON)
+    ))
+
     def to_card(t: Task) -> TaskCard:
         inst = instance_by_task.get(t.id)
         role_name = role_by_id[inst.role_id].name if inst is not None else None
@@ -58,6 +92,8 @@ def get_kanban(db: Session = Depends(db_session)) -> KanbanBoard:
             has_acceptance_criteria=t.acceptance_criteria is not None,
             current_instance_id=inst.id if inst else None,
             current_role_name=role_name,
+            last_instance_failed=t.id in failed_task_ids,
+            awaiting_approval=t.id in awaiting_approval_task_ids,
             created_at=t.created_at,
         )
 
