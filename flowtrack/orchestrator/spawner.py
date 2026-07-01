@@ -659,11 +659,16 @@ def _finalize_failed(instance_id: UUID, job_id: UUID, error: str) -> None:
 def _requeue_on_contention(instance_id: UUID, job_id: UUID) -> None:
     """Lock contention: mark instance FAILED, put the job back to QUEUED.
 
-    The instance never actually ran, so the task stays in whatever status it
-    was in. The orchestrator will retry on the next tick when the conflicting
-    lock is released.
+    The instance never ran, so the task stays in its current status. The
+    orchestrator retries on the next tick once the conflicting lock is released.
+
+    Respects job.max_attempts: if the job has already been attempted max_attempts
+    times without ever getting the lock, it is failed permanently to prevent
+    infinite spin-loops (e.g. when two jobs for the same task are both QUEUED).
     """
     task_id_snapshot: UUID | None = None
+    permanent = False
+
     with _db() as db:
         inst = db.get(Instance, instance_id)
         if inst is not None:
@@ -672,18 +677,29 @@ def _requeue_on_contention(instance_id: UUID, job_id: UUID) -> None:
             task_id_snapshot = inst.task_id
         job = db.get(Job, job_id)
         if job is not None:
-            job.status = JobStatus.QUEUED
-            job.claimed_at = None
-            job.claimed_by = None
-            log.info(
-                "lock contention: requeued job %s for next tick (instance %s never ran)",
-                job_id, instance_id,
-            )
+            if job.attempts >= job.max_attempts:
+                permanent = True
+                release_job(db, job, final_status=JobStatus.FAILED,
+                            error="lock contention (max attempts reached)", instance_id=instance_id)
+                log.warning(
+                    "lock contention: job %s exhausted %d attempts — failing permanently",
+                    job_id, job.max_attempts,
+                )
+            else:
+                job.status = JobStatus.QUEUED
+                job.claimed_at = None
+                job.claimed_by = None
+                log.info(
+                    "lock contention: requeued job %s for next tick (attempt %d/%d, instance %s never ran)",
+                    job_id, job.attempts, job.max_attempts, instance_id,
+                )
+
+    error = "lock contention (permanent)" if permanent else "lock contention — requeued"
     broker.publish_sync("instance_finalized", {
         "instance_id": str(instance_id),
         "status": InstanceStatus.FAILED.value,
         "exit_code": None,
-        "error": "lock contention — requeued",
+        "error": error,
         "task_id": str(task_id_snapshot) if task_id_snapshot else None,
     })
 
