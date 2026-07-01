@@ -49,8 +49,41 @@
         </summary>
         <div id="budget-windows"></div>
       </details>
+
+      <details id="settings-panel">
+        <summary>
+          <span class="panel-title">Settings</span>
+        </summary>
+        <div id="settings-body">
+          <p class="settings-loading">Loading…</p>
+        </div>
+      </details>
+
+      <details id="roles-panel">
+        <summary>
+          <span class="panel-title">Roles</span>
+        </summary>
+        <div id="roles-body">
+          <p class="settings-loading">Loading…</p>
+        </div>
+      </details>
     </aside>
   </main>
+
+  <div id="task-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal-box">
+      <div class="modal-header">
+        <div>
+          <span id="modal-ticket" class="ticket"></span>
+          <span id="modal-status" class="modal-status-badge"></span>
+        </div>
+        <button id="modal-close" class="modal-close" aria-label="Close">✕</button>
+      </div>
+      <h2 id="modal-title" class="modal-title"></h2>
+      <p id="modal-description" class="modal-description"></p>
+      <div id="modal-body" class="modal-body"></div>
+    </div>
+  </div>
 
   <script src="/web/app.js"></script>
 </body>

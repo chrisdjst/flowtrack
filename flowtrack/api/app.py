@@ -23,7 +23,8 @@ from fastapi.staticfiles import StaticFiles
 
 from flowtrack.api.auth import BearerAuthMiddleware, check_websocket_token
 from flowtrack.api.events import broker
-from flowtrack.api.routers import budget, discovery, instances, kanban, tasks
+from flowtrack.api.routers import budget, discovery, instances, kanban, roles_router, tasks, settings_router
+from flowtrack.core.runtime_config import RuntimeConfig
 from flowtrack.core.sentry import init_sentry
 from flowtrack.core.settings import settings
 from flowtrack.discovery.manager import run_discovery_manager
@@ -39,9 +40,9 @@ log = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     log.info(
         "starting orchestrator (dry_run=%s, max_concurrent=%d, interval=%.1fs)",
-        settings.orchestrator_dry_run,
-        settings.max_concurrent_instances,
-        settings.orchestrator_loop_interval_seconds,
+        RuntimeConfig.get("orchestrator_dry_run"),
+        RuntimeConfig.get("max_concurrent_instances"),
+        RuntimeConfig.get("orchestrator_loop_interval_seconds"),
     )
     stop_event = asyncio.Event()
     bg_tasks = [
@@ -80,6 +81,8 @@ app.include_router(tasks.router)
 app.include_router(instances.router)
 app.include_router(budget.router)
 app.include_router(discovery.router)
+app.include_router(settings_router.router)
+app.include_router(roles_router.router)
 
 # Static assets (css/js) under /web/, and the index page at /.
 if _STATIC_DIR.is_dir():
@@ -94,7 +97,7 @@ if _STATIC_DIR.is_dir():
 def healthz() -> dict:
     return {
         "status": "ok",
-        "dry_run": settings.orchestrator_dry_run,
+        "dry_run": RuntimeConfig.get("orchestrator_dry_run"),
         "sentry_active": bool(settings.sentry_dsn),
         "sentry_environment": settings.sentry_environment,
     }
