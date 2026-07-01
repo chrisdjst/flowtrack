@@ -25,7 +25,7 @@ class Event(TimestampMixin, Base):
     session_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("sessions.id")
     )
-    event_type: Mapped[EventType] = mapped_column(Enum(EventType, name="event_type"))
+    event_type: Mapped[EventType] = mapped_column(Enum(EventType, name="event_type", values_callable=lambda x: [e.value for e in x]))
     started_at: Mapped[datetime]
     ended_at: Mapped[datetime | None]
     metadata_json: Mapped[dict | None] = mapped_column(JSONB)

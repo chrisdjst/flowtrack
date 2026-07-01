@@ -22,7 +22,7 @@ class Deployment(TimestampMixin, Base):
     session_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("sessions.id")
     )
-    environment: Mapped[Environment] = mapped_column(Enum(Environment, name="environment"))
+    environment: Mapped[Environment] = mapped_column(Enum(Environment, name="environment", values_callable=lambda x: [e.value for e in x]))
     deployed_at: Mapped[datetime]
     commit_sha: Mapped[str | None] = mapped_column(String(40))
     pr_number: Mapped[int | None]

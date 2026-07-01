@@ -25,13 +25,13 @@ class Session(TimestampMixin, Base):
     __tablename__ = "sessions"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    type: Mapped[SessionType] = mapped_column(Enum(SessionType, name="session_type"))
+    type: Mapped[SessionType] = mapped_column(Enum(SessionType, name="session_type", values_callable=lambda x: [e.value for e in x]))
     ticket_id: Mapped[str | None] = mapped_column(String(100))
     pr_number: Mapped[int | None]
     started_at: Mapped[datetime]
     ended_at: Mapped[datetime | None]
     status: Mapped[SessionStatus] = mapped_column(
-        Enum(SessionStatus, name="session_status"), default=SessionStatus.ACTIVE
+        Enum(SessionStatus, name="session_status", values_callable=lambda x: [e.value for e in x]), default=SessionStatus.ACTIVE
     )
     # NULL = manual CLI session; set = session owned by an orchestrator instance.
     instance_id: Mapped[uuid.UUID | None] = mapped_column(
