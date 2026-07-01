@@ -18,6 +18,7 @@ from uuid import UUID
 
 from flowtrack.api.events import broker
 from flowtrack.core.database import SessionLocal
+from flowtrack.core.runtime_config import RuntimeConfig
 from flowtrack.core.settings import settings
 from flowtrack.discovery.base import DiscoveryCandidate, DiscoveryWorker
 from flowtrack.discovery.promote import promote_item, reject_item
@@ -36,9 +37,9 @@ def default_sources() -> list[DiscoveryWorker]:
     just hammer ``search_issues`` returning empty lists, which adds noise.
     """
     sources: list[DiscoveryWorker] = []
-    if settings.jira_base_url and settings.jira_email and settings.jira_token:
+    if RuntimeConfig.get("jira_base_url") and RuntimeConfig.get("jira_email") and RuntimeConfig.get("jira_token"):
         sources.append(JiraBacklogSource())
-    if settings.github_token and settings.github_owner and settings.github_repo:
+    if RuntimeConfig.get("github_token") and RuntimeConfig.get("github_owner") and RuntimeConfig.get("github_repo"):
         sources.append(GitHubIssuesSource())
     if settings.sentry_token and settings.sentry_org and settings.sentry_project:
         sources.append(SentryIssuesSource())
@@ -64,7 +65,7 @@ async def run_discovery_manager(stop: asyncio.Event) -> None:
                 new_ids = await asyncio.to_thread(_run_source, source)
                 if new_ids:
                     log.info("discovery %s: %d new items", source.name, len(new_ids))
-                    if settings.auto_refine_discovered:
+                    if RuntimeConfig.get("auto_refine_discovered"):
                         for item_id in new_ids:
                             asyncio.create_task(
                                 _auto_refine(item_id), name=f"pm-refine-{item_id}"

@@ -24,7 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from flowtrack.core.settings import settings
+from flowtrack.core.runtime_config import RuntimeConfig
 from flowtrack.models import BudgetWindow
 from flowtrack.models.budget_window import BudgetWindowKind
 
@@ -87,24 +87,26 @@ def record_usage(db: Session, *, cost_usd: Decimal, tokens: int) -> None:
 def is_blocked(db: Session) -> tuple[bool, str | None]:
     """Return (blocked, reason). Cheap — single query."""
     now = datetime.now(tz=timezone.utc)
-    if settings.budget_hour_cap_usd > 0:
+    hour_cap = RuntimeConfig.get("budget_hour_cap_usd")
+    if hour_cap > 0:
         row = db.scalar(
             select(BudgetWindow).where(
                 BudgetWindow.window_start == _truncate(now, BudgetWindowKind.HOUR),
                 BudgetWindow.window_kind == BudgetWindowKind.HOUR,
             )
         )
-        if row and float(row.cost_usd) >= settings.budget_hour_cap_usd:
-            return True, f"hour cap ${settings.budget_hour_cap_usd} reached (spent ${row.cost_usd})"
-    if settings.budget_day_cap_usd > 0:
+        if row and float(row.cost_usd) >= hour_cap:
+            return True, f"hour cap ${hour_cap} reached (spent ${row.cost_usd})"
+    day_cap = RuntimeConfig.get("budget_day_cap_usd")
+    if day_cap > 0:
         row = db.scalar(
             select(BudgetWindow).where(
                 BudgetWindow.window_start == _truncate(now, BudgetWindowKind.DAY),
                 BudgetWindow.window_kind == BudgetWindowKind.DAY,
             )
         )
-        if row and float(row.cost_usd) >= settings.budget_day_cap_usd:
-            return True, f"day cap ${settings.budget_day_cap_usd} reached (spent ${row.cost_usd})"
+        if row and float(row.cost_usd) >= day_cap:
+            return True, f"day cap ${day_cap} reached (spent ${row.cost_usd})"
     return False, None
 
 
@@ -126,7 +128,7 @@ def current_windows(db: Session) -> dict[str, dict]:
             "task_count": int(row.task_count) if row else 0,
         }
     out["caps"] = {
-        "hour_usd": settings.budget_hour_cap_usd,
-        "day_usd": settings.budget_day_cap_usd,
+        "hour_usd": RuntimeConfig.get("budget_hour_cap_usd"),
+        "day_usd": RuntimeConfig.get("budget_day_cap_usd"),
     }
     return out

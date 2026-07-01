@@ -184,6 +184,7 @@ def _persist_event(
             "tokens_output": instance.tokens_output,
             "cost_usd": str(instance.cost_usd),
             "summary": _event_summary(event_type, payload),
+            "text": _event_text(event_type, payload),
         })
     except Exception:
         db.rollback()
@@ -226,6 +227,57 @@ def _extract_result_cost(event_type: InstanceEventType, payload: dict) -> float 
         return float(raw)
     except (TypeError, ValueError):
         return None
+
+
+def _event_text(event_type: InstanceEventType, payload: dict) -> str:
+    """Richer text for live modal display — extracts actual content from payload."""
+    if event_type == InstanceEventType.ASSISTANT:
+        # Real Claude Code sends ASSISTANT with message.content = list of blocks.
+        # Each block is {"type": "text", "text": "..."} or {"type": "tool_use", ...}.
+        parts: list[str] = []
+        message = payload.get("message") or payload
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "text":
+                    t = block.get("text", "")
+                    if t:
+                        parts.append(t)
+                elif block.get("type") == "tool_use":
+                    name = block.get("name", "?")
+                    inp = block.get("input") or {}
+                    brief = str(inp)[:200] if inp else ""
+                    parts.append(f"[tool: {name}] {brief}".strip())
+        return "\n".join(parts)[:1000]
+
+    if event_type == InstanceEventType.MESSAGE:
+        # Streaming delta: {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "..."}}
+        delta = payload.get("delta") or {}
+        if isinstance(delta, dict) and delta.get("type") == "text_delta":
+            return delta.get("text", "")
+        # content_block_start carries partial tool_use input
+        block = payload.get("content_block") or {}
+        if isinstance(block, dict) and block.get("type") == "tool_use":
+            return f"[tool: {block.get('name', '?')}]"
+        return ""
+
+    if event_type == InstanceEventType.TOOL_USE:
+        name = payload.get("name") or payload.get("tool", "?")
+        inp = payload.get("input") or {}
+        brief = str(inp)[:300] if inp else ""
+        return f"[{name}] {brief}".strip()
+
+    if event_type == InstanceEventType.ERROR:
+        return payload.get("error") or payload.get("raw", "error")
+
+    if event_type == InstanceEventType.RESULT:
+        subtype = payload.get("subtype", "")
+        cost = payload.get("total_cost_usd")
+        return f"{subtype} — cost ${cost}" if cost else subtype
+
+    return ""
 
 
 def _event_summary(event_type: InstanceEventType, payload: dict) -> str:

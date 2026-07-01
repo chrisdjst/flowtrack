@@ -36,6 +36,8 @@ class TaskCard(_Base):
     has_acceptance_criteria: bool  # derived; see kanban router
     current_instance_id: UUID | None  # derived
     current_role_name: str | None  # derived
+    last_instance_failed: bool  # derived; true when last instance exited with failure
+    awaiting_approval: bool  # derived; true when blocked awaiting human approval to return to dev
     created_at: datetime
 
 
@@ -72,6 +74,56 @@ class AssignTaskRequest(BaseModel):
     worker_id: str | None = None
 
 
+class AdvanceTaskRequest(BaseModel):
+    status: str
+
+
+class AdvanceTaskResponse(BaseModel):
+    task_id: UUID
+    status: str
+    job_id: UUID | None = None
+    role_triggered: str | None = None
+
+
+class TaskTransitionDetail(_Base):
+    from_status: str | None
+    to_status: str
+    reason: str | None
+    transitioned_at: datetime
+    instance_id: UUID | None
+
+
+class InstanceEventDetail(_Base):
+    event_type: str
+    summary: str
+    recorded_at: datetime
+
+
+class InstanceDetail(_Base):
+    id: UUID
+    role_name: str
+    status: str
+    tokens_input: int
+    tokens_output: int
+    cost_usd: Decimal
+    spawned_at: datetime
+    finished_at: datetime | None
+    exit_code: int | None
+    events: list[InstanceEventDetail]
+
+
+class TaskDetail(_Base):
+    id: UUID
+    title: str
+    description: str | None
+    status: str
+    priority: str
+    ticket_id: str | None
+    created_at: datetime
+    transitions: list[TaskTransitionDetail]
+    instances: list[InstanceDetail]
+
+
 class JobResponse(_Base):
     id: UUID
     task_id: UUID
@@ -80,3 +132,28 @@ class JobResponse(_Base):
     priority: int
     attempts: int
     created_at: datetime
+
+
+class RoleCard(_Base):
+    id: UUID
+    name: str
+    model: str
+    max_tokens: int
+    max_turns: int | None
+    max_minutes: int
+    tools_allowed: list[str] | None
+    system_prompt: str
+    next_role_name: str | None
+    task_status_on_success: str | None
+    updated_at: datetime
+
+
+class RoleUpdate(BaseModel):
+    model: str | None = None
+    max_tokens: int | None = None
+    max_turns: int | None = None
+    max_minutes: int | None = None
+    tools_allowed: list[str] | None = None
+    system_prompt: str | None = None
+    next_role_name: str | None = None
+    task_status_on_success: str | None = None

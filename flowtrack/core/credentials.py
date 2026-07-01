@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from flowtrack.core.settings import settings
 
-SENSITIVE_KEYS = frozenset({"github_token", "jira_token"})
+SENSITIVE_KEYS = frozenset({"github_token", "jira_token", "anthropic_api_key"})
 
 DB_KEYS = frozenset({
     "github_token",

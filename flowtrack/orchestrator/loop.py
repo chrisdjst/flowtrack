@@ -21,7 +21,7 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from flowtrack.core.database import SessionLocal
-from flowtrack.core.settings import settings
+from flowtrack.core.runtime_config import RuntimeConfig
 from flowtrack.models import Instance, Job
 from flowtrack.models.instance import InstanceStatus
 from flowtrack.models.job import JobStatus
@@ -38,14 +38,14 @@ async def run_orchestrator(stop: asyncio.Event) -> None:
     log.info("orchestrator loop started")
     tick_no = 0
     active: set[asyncio.Task] = set()
-    interval = settings.orchestrator_loop_interval_seconds
-    heartbeat_every = max(1, int(30 / interval))
 
     while not stop.is_set():
         tick_no += 1
         active = {t for t in active if not t.done()}
+        interval = RuntimeConfig.get("orchestrator_loop_interval_seconds")
+        heartbeat_every = max(1, int(30 / interval))
 
-        if len(active) < settings.max_concurrent_instances:
+        if len(active) < RuntimeConfig.get("max_concurrent_instances"):
             try:
                 dispatch = await asyncio.to_thread(_claim_one, tick_no, heartbeat_every)
             except Exception:
@@ -99,7 +99,7 @@ def _claim_one(tick_no: int, heartbeat_every: int) -> tuple[UUID, UUID] | None:
         if job is None:
             return None
 
-        if settings.orchestrator_dry_run:
+        if RuntimeConfig.get("orchestrator_dry_run"):
             log.info(
                 "DRY RUN: would spawn role_id=%s for task_id=%s (job=%s)",
                 job.role_id, job.task_id, job.id,
