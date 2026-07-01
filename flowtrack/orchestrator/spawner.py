@@ -30,6 +30,7 @@ from sqlalchemy import select
 
 from flowtrack.api.events import broker
 from flowtrack.core.database import SessionLocal
+from flowtrack.core.runtime_config import RuntimeConfig
 from flowtrack.core.settings import settings
 from flowtrack.models import Instance, InstanceEvent, Job, Role, Task, TaskComment, TaskTransition
 from flowtrack.models.instance import InstanceStatus
@@ -55,6 +56,8 @@ class _SpawnContext:
     role_tools_allowed: list[str] | None
     role_max_minutes: int
     role_model: str
+    role_max_tokens: int
+    role_max_turns: int | None
     task_id: UUID
     task_title: str
     task_description: str | None
@@ -88,8 +91,8 @@ async def _supervise_inner(job_id: UUID, instance_id: UUID) -> None:
         return
 
     # 2. Worktree.
-    target_repo = Path(settings.target_repo_path or os.getcwd()).resolve()
-    worktree_root = Path(settings.worktree_root).resolve()
+    target_repo = Path(RuntimeConfig.get("target_repo_path") or os.getcwd()).resolve()
+    worktree_root = Path(RuntimeConfig.get("worktree_root")).resolve()
     try:
         wt_path = await worktree.create_worktree(
             target_repo=target_repo,
@@ -104,13 +107,16 @@ async def _supervise_inner(job_id: UUID, instance_id: UUID) -> None:
         return
 
     # 3. Locks.
-    lock_keys = locks.derive_locks_for(module_hint=ctx.task_module_hint)
+    lock_keys = locks.derive_locks_for(
+        module_hint=ctx.task_module_hint,
+        task_id=str(ctx.task_id),
+    )
     if not await asyncio.to_thread(
         _try_acquire_locks, instance_id, lock_keys, ctx.role_max_minutes
     ):
-        # Conflict — let watchdog / next tick retry. Mark instance + job failed
-        # softly so we surface the contention. (A future iteration can requeue.)
-        await asyncio.to_thread(_finalize_failed, instance_id, job_id, "lock contention")
+        # Lock held by another instance on the same module — requeue so the
+        # orchestrator retries on the next tick once the lock is released.
+        await asyncio.to_thread(_requeue_on_contention, instance_id, job_id)
         return
 
     # 4. Persist worktree info + flip to RUNNING. Subprocess starts next.
@@ -204,6 +210,8 @@ def _load_context(instance_id: UUID, job_id: UUID) -> _SpawnContext | None:
             role_tools_allowed=list(role.tools_allowed) if role.tools_allowed else None,
             role_max_minutes=role.max_minutes,
             role_model=role.model,
+            role_max_tokens=role.max_tokens,
+            role_max_turns=role.max_turns,
             task_id=task.id,
             task_title=task.title,
             task_description=task.description,
@@ -280,15 +288,36 @@ def _finalize(
     })
 
 
+_REQUEST_CHANGES_REASON = "reviewer: REQUEST_CHANGES"
+_AWAIT_APPROVAL_REASON = "reviewer: REQUEST_CHANGES (awaiting approval)"
+
+
+def _prior_request_changes_count(db: Session, task_id: UUID) -> int:
+    """Count how many times this task has already been sent back to dev by the reviewer."""
+    from sqlalchemy import func
+    return db.scalar(
+        select(func.count()).select_from(TaskTransition).where(
+            TaskTransition.task_id == task_id,
+            TaskTransition.reason == _REQUEST_CHANGES_REASON,
+        )
+    ) or 0
+
+
 def _send_back_to_dev(
     db: Session, *, task: Task, role: Role, instance_id: UUID
 ) -> None:
     """Reviewer rejected: route the task back to dev with the reviewer's
     parent_branch so dev's next worktree sees what was reviewed.
 
-    Records a transition + a comment + a new dev Job. Stays in the same
-    worker lane via inst.worker_id propagation.
+    On the first REQUEST_CHANGES the dev job is enqueued automatically.
+    On subsequent cycles the task is blocked and the frontend must confirm
+    before the job is created — see _await_approval_to_return_to_dev.
     """
+    prior_cycles = _prior_request_changes_count(db, task.id)
+    if prior_cycles >= 1:
+        _await_approval_to_return_to_dev(db, task=task, role=role, instance_id=instance_id)
+        return
+
     inst = db.get(Instance, instance_id)
     dev_role = db.scalar(select(Role).where(Role.name == "dev"))
     if dev_role is None:
@@ -300,7 +329,7 @@ def _send_back_to_dev(
     task.status = TaskStatus.IN_PROGRESS
     db.add(TaskTransition(
         task_id=task.id, from_status=from_status, to_status=task.status.value,
-        instance_id=instance_id, reason="reviewer: REQUEST_CHANGES",
+        instance_id=instance_id, reason=_REQUEST_CHANGES_REASON,
     ))
     db.add(TaskComment(
         task_id=task.id,
@@ -323,6 +352,44 @@ def _send_back_to_dev(
         "task_id": str(task.id),
         "from_role": role.name,
         "instance_id": str(instance_id),
+    })
+    broker.publish_sync("task_transitioned", {
+        "task_id": str(task.id), "from_status": from_status,
+        "to_status": task.status.value, "by_role": role.name,
+        "instance_id": str(instance_id),
+    })
+
+
+def _await_approval_to_return_to_dev(
+    db: Session, *, task: Task, role: Role, instance_id: UUID
+) -> None:
+    """Reviewer requested changes again (2nd+ cycle): block and ask human.
+
+    The task goes to BLOCKED with a distinct reason. The kanban frontend shows
+    an approval button; when clicked it calls POST /api/tasks/{id}/approve-return-dev
+    which enqueues the dev job and transitions back to IN_PROGRESS.
+    """
+    prior_cycles = _prior_request_changes_count(db, task.id)
+    from_status = task.status.value if task.status else None
+    task.status = TaskStatus.BLOCKED
+    db.add(TaskTransition(
+        task_id=task.id, from_status=from_status, to_status=task.status.value,
+        instance_id=instance_id, reason=_AWAIT_APPROVAL_REASON,
+    ))
+    db.add(TaskComment(
+        task_id=task.id,
+        body=(
+            f"Reviewer requested changes (cycle {prior_cycles + 1}). "
+            "Automatic return to dev is disabled — human approval required. "
+            "Click 'Aprovar → Dev' on the kanban card to continue."
+        ),
+        author_role_id=role.id, instance_id=instance_id,
+    ))
+    broker.publish_sync("reviewer_return_approval_needed", {
+        "task_id": str(task.id),
+        "task_title": task.title,
+        "instance_id": str(instance_id),
+        "cycle": prior_cycles + 1,
     })
     broker.publish_sync("task_transitioned", {
         "task_id": str(task.id), "from_status": from_status,
@@ -516,6 +583,38 @@ def _finalize_failed(instance_id: UUID, job_id: UUID, error: str) -> None:
     )
 
 
+def _requeue_on_contention(instance_id: UUID, job_id: UUID) -> None:
+    """Lock contention: mark instance FAILED, put the job back to QUEUED.
+
+    The instance never actually ran, so the task stays in whatever status it
+    was in. The orchestrator will retry on the next tick when the conflicting
+    lock is released.
+    """
+    task_id_snapshot: UUID | None = None
+    with _db() as db:
+        inst = db.get(Instance, instance_id)
+        if inst is not None:
+            inst.status = InstanceStatus.FAILED
+            inst.finished_at = datetime.now(tz=timezone.utc)
+            task_id_snapshot = inst.task_id
+        job = db.get(Job, job_id)
+        if job is not None:
+            job.status = JobStatus.QUEUED
+            job.claimed_at = None
+            job.claimed_by = None
+            log.info(
+                "lock contention: requeued job %s for next tick (instance %s never ran)",
+                job_id, instance_id,
+            )
+    broker.publish_sync("instance_finalized", {
+        "instance_id": str(instance_id),
+        "status": InstanceStatus.FAILED.value,
+        "exit_code": None,
+        "error": "lock contention — requeued",
+        "task_id": str(task_id_snapshot) if task_id_snapshot else None,
+    })
+
+
 # --------------------------------------------------------------------------- #
 # Subprocess plumbing                                                         #
 # --------------------------------------------------------------------------- #
@@ -532,7 +631,7 @@ def _build_command(ctx: _SpawnContext) -> list[str]:
     plug in a mock without packaging it as a real exe.
     """
     prompt = _build_prompt(ctx)
-    cmd_prefix = shlex.split(settings.claude_executable, posix=(os.name != "nt"))
+    cmd_prefix = shlex.split(RuntimeConfig.get("claude_executable"), posix=(os.name != "nt"))
     if os.name == "nt":
         # shlex with posix=False keeps surrounding quotes as part of the token;
         # subprocess on Windows then can't find e.g. `"C:/python.exe"` literally.
@@ -544,8 +643,11 @@ def _build_command(ctx: _SpawnContext) -> list[str]:
         # Claude Code refuses to combine --print with --output-format=stream-json
         # unless --verbose is also set (it gates the streaming output stream).
         "--verbose",
-        "--session-id", str(ctx.task_id),  # any UUID; we don't use it for resume yet
+        "--session-id", str(ctx.task_id),
+        "--model", ctx.role_model,
     ]
+    if ctx.role_max_turns is not None:
+        cmd += ["--max-turns", str(ctx.role_max_turns)]
     if ctx.role_system_prompt:
         cmd += ["--append-system-prompt", ctx.role_system_prompt]
     if ctx.role_tools_allowed:
@@ -570,8 +672,9 @@ def _build_prompt(ctx: _SpawnContext) -> str:
 
 def _build_env(*, instance_id: UUID) -> dict[str, str]:
     env = dict(os.environ)
-    if settings.anthropic_api_key:
-        env["ANTHROPIC_API_KEY"] = settings.anthropic_api_key
+    api_key = RuntimeConfig.get("anthropic_api_key")
+    if api_key:
+        env["ANTHROPIC_API_KEY"] = api_key
     # Used by hooks inside the worktree to call back into the daemon.
     env["FLOWTRACK_API_URL"] = f"http://{settings.api_host}:{settings.api_port}"
     env["FLOWTRACK_INSTANCE_ID"] = str(instance_id)

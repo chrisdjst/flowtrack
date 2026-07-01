@@ -20,16 +20,21 @@ from flowtrack.models import ResourceLock
 log = logging.getLogger(__name__)
 
 
-def derive_locks_for(*, module_hint: str | None) -> list[str]:
+def derive_locks_for(*, module_hint: str | None, task_id: str | None = None) -> list[str]:
     """Return the resource_keys a task needs to hold while running.
 
-    Conservative-first policy — see docs/ORCHESTRATOR.md §5.3 for granularity
-    discussion. MVP: module_hint if set, else a coarse "_unknown_" lock that
-    serializes execution (preferable to silent conflict).
+    When module_hint is set, two tasks sharing the same module are serialized
+    (prevents simultaneous edits to the same codebase module).
+
+    When module_hint is absent, fall back to a task-scoped lock so only THIS
+    task is prevented from running twice at once — different tasks with no
+    module_hint can still run in parallel up to max_concurrent_instances.
     """
     if module_hint:
         return [f"module:{module_hint}"]
-    return ["module:_unknown_"]
+    if task_id:
+        return [f"task:{task_id}"]
+    return [f"task:_unknown_"]
 
 
 def try_acquire(
