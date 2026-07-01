@@ -178,12 +178,14 @@ async def _supervise_inner(job_id: UUID, instance_id: UUID) -> None:
 
     await _cleanup_tasks(consumer_task, stderr_task)
 
-    final_status = InstanceStatus.COMPLETED if rc == 0 else InstanceStatus.FAILED
-    job_status = JobStatus.DONE if rc == 0 else JobStatus.FAILED
-    await asyncio.to_thread(
-        _finalize, instance_id, job_id, final_status, job_status,
-        exit_code=rc, error=None if rc == 0 else f"exit {rc}",
-    )
+    if rc == 0:
+        await asyncio.to_thread(
+            _finalize, instance_id, job_id,
+            InstanceStatus.COMPLETED, JobStatus.DONE,
+            exit_code=0, error=None,
+        )
+    else:
+        await asyncio.to_thread(_handle_nonzero_exit, instance_id, job_id, rc)
 
 
 # --------------------------------------------------------------------------- #
@@ -573,6 +575,77 @@ def _advance_pipeline(
             "worker_id": next_worker_id,
             "parent_branch": parent_branch,
         })
+
+
+def _read_last_result_info(instance_id: UUID) -> tuple[str | None, int | None]:
+    """Return (subtype, api_error_status) from the last RESULT event for an instance."""
+    with _db() as db:
+        last = db.scalar(
+            select(InstanceEvent)
+            .where(InstanceEvent.instance_id == instance_id)
+            .where(InstanceEvent.event_type == InstanceEventType.RESULT)
+            .order_by(InstanceEvent.id.desc())
+            .limit(1)
+        )
+        if last is None:
+            return None, None
+        p = last.payload_json or {}
+        return p.get("subtype"), p.get("api_error_status")
+
+
+def _handle_nonzero_exit(instance_id: UUID, job_id: UUID, rc: int) -> None:
+    """Decide between transient retry and permanent failure on exit code != 0.
+
+    Claude Code exits 1 in two recoverable situations:
+    - error_max_turns: the agent hit --max-turns; requeue for another attempt
+    - api_error_status 429: five_hour rate limit exhausted; requeue to retry later
+
+    Both cases are retried up to job.max_attempts times. On exhaustion the job
+    becomes permanently FAILED so the task doesn't spin forever.
+    """
+    subtype, api_error = _read_last_result_info(instance_id)
+    should_requeue = subtype == "error_max_turns" or api_error == 429
+
+    if not should_requeue:
+        _finalize_failed(instance_id, job_id, f"exit {rc}" + (f" ({subtype})" if subtype else ""))
+        return
+
+    task_id_snapshot: UUID | None = None
+    requeue_reason = "max_turns — requeued" if subtype == "error_max_turns" else "rate_limit 429 — requeued"
+    permanent = False
+
+    with _db() as db:
+        inst = db.get(Instance, instance_id)
+        if inst is not None:
+            inst.status = InstanceStatus.FAILED
+            inst.exit_code = rc
+            inst.finished_at = datetime.now(tz=timezone.utc)
+            task_id_snapshot = inst.task_id
+        locks.release_all(db, instance_id=instance_id)
+        job = db.get(Job, job_id)
+        if job is not None:
+            if job.attempts >= job.max_attempts:
+                # Exhausted retries — fail permanently
+                permanent = True
+                release_job(db, job, final_status=JobStatus.FAILED,
+                            error=f"{requeue_reason} (max attempts reached)", instance_id=instance_id)
+            else:
+                job.status = JobStatus.QUEUED
+                job.claimed_at = None
+                job.claimed_by = None
+                log.info(
+                    "instance %s: %s (attempt %d/%d)",
+                    instance_id, requeue_reason, job.attempts, job.max_attempts,
+                )
+
+    error_label = f"{requeue_reason} (permanent)" if permanent else requeue_reason
+    broker.publish_sync("instance_finalized", {
+        "instance_id": str(instance_id),
+        "status": InstanceStatus.FAILED.value,
+        "exit_code": rc,
+        "error": error_label,
+        "task_id": str(task_id_snapshot) if task_id_snapshot else None,
+    })
 
 
 def _finalize_failed(instance_id: UUID, job_id: UUID, error: str) -> None:
