@@ -16,6 +16,7 @@ from flowtrack.api.schemas import (
     TaskDetail,
     TaskTransitionDetail,
 )
+from flowtrack.integrations.jira_sync import push_task_status
 from flowtrack.models import Instance, InstanceEvent, Job, Role, Task, TaskComment, TaskTransition
 from flowtrack.models.instance import InstanceStatus
 from flowtrack.models.instance_event import InstanceEventType
@@ -207,6 +208,7 @@ def advance_task_status(
 
     from_status = task.status.value if task.status else None
     task.status = new_status
+    push_task_status(task.ticket_id, new_status.value)
     db.add(TaskTransition(
         task_id=task.id,
         from_status=from_status,
@@ -288,6 +290,7 @@ def approve_return_to_dev(
 
     from_status = task.status.value
     task.status = TaskStatus.IN_PROGRESS
+    push_task_status(task.ticket_id, task.status.value)
     db.add(TaskTransition(
         task_id=task.id,
         from_status=from_status,

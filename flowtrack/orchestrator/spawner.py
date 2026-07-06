@@ -37,6 +37,7 @@ from flowtrack.models.instance import InstanceStatus
 from flowtrack.models.instance_event import InstanceEventType
 from flowtrack.models.job import JobStatus
 from flowtrack.models.task import TaskStatus
+from flowtrack.integrations.jira_sync import push_task_status
 from flowtrack.orchestrator import hooks, locks, worktree
 from flowtrack.orchestrator.queue import release_job
 from flowtrack.orchestrator.stream_parser import consume_stream
@@ -329,6 +330,7 @@ def _send_back_to_dev(
 
     from_status = task.status.value if task.status else None
     task.status = TaskStatus.IN_PROGRESS
+    push_task_status(task.ticket_id, task.status.value)
     db.add(TaskTransition(
         task_id=task.id, from_status=from_status, to_status=task.status.value,
         instance_id=instance_id, reason=_REQUEST_CHANGES_REASON,
@@ -374,6 +376,7 @@ def _await_approval_to_return_to_dev(
     prior_cycles = _prior_request_changes_count(db, task.id)
     from_status = task.status.value if task.status else None
     task.status = TaskStatus.BLOCKED
+    push_task_status(task.ticket_id, task.status.value)
     db.add(TaskTransition(
         task_id=task.id, from_status=from_status, to_status=task.status.value,
         instance_id=instance_id, reason=_AWAIT_APPROVAL_REASON,
@@ -406,6 +409,7 @@ def _block_for_human(
     """Reviewer punted: task -> blocked, comment + WS event for the kanban."""
     from_status = task.status.value if task.status else None
     task.status = TaskStatus.BLOCKED
+    push_task_status(task.ticket_id, task.status.value)
     db.add(TaskTransition(
         task_id=task.id, from_status=from_status, to_status=task.status.value,
         instance_id=instance_id, reason="reviewer: NEEDS_HUMAN",
@@ -525,6 +529,7 @@ def _advance_pipeline(
         else:
             from_status = task.status.value if task.status else None
             task.status = new_status
+            push_task_status(task.ticket_id, new_status.value)
             db.add(TaskTransition(
                 task_id=task.id,
                 from_status=from_status,

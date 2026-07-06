@@ -96,6 +96,48 @@ class JiraClient:
         except httpx.HTTPError:
             return []
 
+    def get_transitions(self, ticket_id: str) -> list[dict]:
+        """Return available transitions for an issue."""
+        creds = self._get_creds()
+        if not self._is_configured(creds):
+            return []
+        url = f"{creds['jira_base_url']}/rest/api/3/issue/{ticket_id}/transitions"
+        try:
+            resp = httpx.get(url, headers=self._headers(creds), timeout=10)
+            return resp.json().get("transitions", []) if resp.status_code == 200 else []
+        except httpx.HTTPError:
+            return []
+
+    def transition_issue(self, ticket_id: str, *candidate_names: str) -> bool:
+        """Move an issue to the first matching transition name (case-insensitive).
+
+        Accepts multiple candidate names so callers can provide fallbacks for
+        different Jira workflow configurations (e.g. "In Review" / "Code Review").
+        Returns True on first successful transition.
+        """
+        transitions = self.get_transitions(ticket_id)
+        if not transitions:
+            return False
+        by_name = {t["name"].lower(): t["id"] for t in transitions}
+        creds = self._get_creds()
+        url = f"{creds['jira_base_url']}/rest/api/3/issue/{ticket_id}/transitions"
+        for name in candidate_names:
+            tid = by_name.get(name.lower())
+            if tid is None:
+                continue
+            try:
+                resp = httpx.post(
+                    url,
+                    json={"transition": {"id": tid}},
+                    headers=self._headers(creds),
+                    timeout=10,
+                )
+                if resp.status_code == 204:
+                    return True
+            except httpx.HTTPError:
+                pass
+        return False
+
     def post_comment(self, ticket_id: str, body: str) -> bool:
         creds = self._get_creds()
         if not self._is_configured(creds):
