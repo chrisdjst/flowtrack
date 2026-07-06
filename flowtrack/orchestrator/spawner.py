@@ -604,7 +604,8 @@ def _handle_nonzero_exit(instance_id: UUID, job_id: UUID, rc: int) -> None:
     becomes permanently FAILED so the task doesn't spin forever.
     """
     subtype, api_error = _read_last_result_info(instance_id)
-    should_requeue = subtype == "error_max_turns" or api_error == 429
+    # error_during_execution: agent interrupted mid-tool (Docker hang, SIGTERM, etc.) — retriable
+    should_requeue = subtype in ("error_max_turns", "error_during_execution") or api_error == 429
 
     if not should_requeue:
         _finalize_failed(instance_id, job_id, f"exit {rc}" + (f" ({subtype})" if subtype else ""))
