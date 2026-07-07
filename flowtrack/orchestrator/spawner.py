@@ -70,6 +70,9 @@ class _SpawnContext:
     # roles (reviewer, qa), the previous role's branch so the new agent sees
     # the prior commits. Read from Job.payload_json.parent_branch.
     base_branch: str
+    # Summary of what the previous instance accomplished. Injected into the
+    # prompt on retries so the agent continues instead of restarting from scratch.
+    resume_context: str | None
 
 
 async def supervise(job_id: UUID, instance_id: UUID) -> None:
@@ -223,6 +226,7 @@ def _load_context(instance_id: UUID, job_id: UUID) -> _SpawnContext | None:
             task_module_hint=task.module_hint,
             branch_name=f"auto/{role.name}-{short}-{ishort}",
             base_branch=parent_branch or "HEAD",
+            resume_context=payload.get("resume_context"),
         )
 
 
@@ -582,6 +586,83 @@ def _advance_pipeline(
         })
 
 
+def _build_resume_context(instance_id: UUID) -> str | None:
+    """Summarise what the previous instance accomplished so the next run can continue.
+
+    Extracts the last assistant text blocks and tool calls from the instance's
+    event log and formats them as a compact handoff section injected into the
+    next run's prompt. This prevents the agent from re-exploring the codebase
+    or repeating work it already finished when it hit the turn limit.
+
+    Returns None when there is nothing meaningful to extract.
+    """
+    with _db() as db:
+        events = list(db.scalars(
+            select(InstanceEvent)
+            .where(InstanceEvent.instance_id == instance_id)
+            .where(InstanceEvent.event_type == InstanceEventType.ASSISTANT)
+            .order_by(InstanceEvent.id.asc())
+        ))
+
+    text_blocks: list[str] = []
+    tool_entries: list[str] = []
+
+    for ev in events:
+        p = ev.payload_json or {}
+        # Content can live at top level or nested under "message"
+        content = p.get("message", {}).get("content", []) if "message" in p else p.get("content", [])
+        if not isinstance(content, list):
+            continue
+        for blk in content:
+            if not isinstance(blk, dict):
+                continue
+            btype = blk.get("type")
+            if btype == "text":
+                txt = (blk.get("text") or "").strip()
+                if len(txt) > 30:
+                    text_blocks.append(txt)
+            elif btype == "tool_use":
+                name = blk.get("name", "?")
+                inp = blk.get("input") or {}
+                cmd = inp.get("command", inp.get("pattern", inp.get("query", "")))
+                if not cmd:
+                    cmd = str(inp)[:80]
+                tool_entries.append(f"[{name}] {str(cmd)[:100]}")
+
+    if not text_blocks and not tool_entries:
+        return None
+
+    parts: list[str] = [
+        "## Continuation from previous attempt",
+        (
+            "This is a **retry** — the previous attempt ran out of turns before finishing. "
+            "The work below was already completed. Do NOT repeat it; pick up from where "
+            "it left off and focus only on what remains."
+        ),
+    ]
+
+    if text_blocks:
+        # Show the last 4 reasoning blocks — most recent context is most useful.
+        parts.append("\n### What was done (agent notes, last 4):")
+        for txt in text_blocks[-4:]:
+            # Cap each block so the prompt stays compact
+            excerpt = txt[:400] + ("…" if len(txt) > 400 else "")
+            parts.append(f"> {excerpt}")
+
+    if tool_entries:
+        # Show last 15 tool calls to give a concrete trail of actions.
+        shown = tool_entries[-15:]
+        parts.append(f"\n### Tool calls made (last {len(shown)}):")
+        for entry in shown:
+            parts.append(f"- {entry}")
+
+    parts.append(
+        "\n**Continue the task from the next logical step without re-reading "
+        "files or re-running commands that are already reflected above.**"
+    )
+    return "\n".join(parts)
+
+
 def _read_last_result_info(instance_id: UUID) -> tuple[str | None, int | None]:
     """Return (subtype, api_error_status) from the last RESULT event for an instance."""
     with _db() as db:
@@ -616,6 +697,11 @@ def _handle_nonzero_exit(instance_id: UUID, job_id: UUID, rc: int) -> None:
         _finalize_failed(instance_id, job_id, f"exit {rc}" + (f" ({subtype})" if subtype else ""))
         return
 
+    # Build resume context before opening the DB write transaction so it runs
+    # in its own read-only connection and doesn't hold locks during the HTTP
+    # round-trip that _build_resume_context may do in the future.
+    resume_ctx = _build_resume_context(instance_id) if subtype in ("error_max_turns", "error_during_execution") else None
+
     task_id_snapshot: UUID | None = None
     requeue_reason = "max_turns — requeued" if subtype == "error_max_turns" else "rate_limit 429 — requeued"
     permanent = False
@@ -639,9 +725,14 @@ def _handle_nonzero_exit(instance_id: UUID, job_id: UUID, rc: int) -> None:
                 job.status = JobStatus.QUEUED
                 job.claimed_at = None
                 job.claimed_by = None
+                if resume_ctx:
+                    payload = dict(job.payload_json or {})
+                    payload["resume_context"] = resume_ctx
+                    job.payload_json = payload
                 log.info(
-                    "instance %s: %s (attempt %d/%d)",
+                    "instance %s: %s (attempt %d/%d, resume_context=%s)",
                     instance_id, requeue_reason, job.attempts, job.max_attempts,
+                    "yes" if resume_ctx else "no",
                 )
 
     error_label = f"{requeue_reason} (permanent)" if permanent else requeue_reason
@@ -762,6 +853,8 @@ def _build_prompt(ctx: _SpawnContext) -> str:
         parts += ["", "## Module scope",
                   f"You may only edit files under: `{ctx.task_module_hint}`."]
     parts += ["", f"You are acting in the role of `{ctx.role_name}`."]
+    if ctx.resume_context:
+        parts += ["", ctx.resume_context]
     return "\n".join(parts)
 
 
