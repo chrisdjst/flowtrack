@@ -21,7 +21,7 @@ from flowtrack.models import Instance, InstanceEvent, Job, Role, Task, TaskComme
 from flowtrack.models.instance import InstanceStatus
 from flowtrack.models.instance_event import InstanceEventType
 from flowtrack.models.task import TaskStatus
-from flowtrack.orchestrator.spawner import _AWAIT_APPROVAL_REASON, _REQUEST_CHANGES_REASON
+from flowtrack.orchestrator.spawner import _AWAIT_APPROVAL_REASON, _REQUEST_CHANGES_REASON, _build_resume_context
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -30,6 +30,13 @@ _STATUS_TO_AUTO_ROLE: dict[str, str] = {
     "in_progress": "dev",
     "in_review": "reviewer",
     "in_qa": "qa",
+}
+
+# Reverse: role name → status to apply when that role is manually assigned.
+_ROLE_TO_STATUS: dict[str, TaskStatus] = {
+    "dev":      TaskStatus.IN_PROGRESS,
+    "reviewer": TaskStatus.IN_REVIEW,
+    "qa":       TaskStatus.IN_QA,
 }
 
 _LIVE_STATUSES = (InstanceStatus.SPAWNING, InstanceStatus.RUNNING, InstanceStatus.WAITING_INPUT)
@@ -159,9 +166,11 @@ def assign_task(
 ) -> Job:
     """Enqueue a Job binding (task, role). The orchestrator loop will pick it up.
 
-    We do not check whether a previous Job for (task, role) is already running —
-    that's a policy decision left to the orchestrator (idempotency at the spawn
-    layer, not at enqueue).
+    Side effects:
+    - Transitions task.status to the canonical status for the assigned role
+      (dev → in_progress, reviewer → in_review, qa → in_qa).
+    - Injects resume_context from the most recent failed instance of the same
+      role so the agent continues instead of restarting from scratch.
     """
     task = db.get(Task, task_id)
     if task is None:
@@ -173,14 +182,50 @@ def assign_task(
             status.HTTP_404_NOT_FOUND, detail=f"role '{payload.role_name}' not found"
         )
 
+    # 1. Transition task status if the role has a canonical status mapping.
+    new_task_status = _ROLE_TO_STATUS.get(role.name)
+    from_status = task.status.value if task.status else None
+    if new_task_status and task.status != new_task_status:
+        task.status = new_task_status
+        push_task_status(task.ticket_id, new_task_status.value)
+        db.add(TaskTransition(
+            task_id=task.id,
+            from_status=from_status,
+            to_status=new_task_status.value,
+            reason=f"manual assign: {role.name}",
+        ))
+        broker.publish_sync("task_transitioned", {
+            "task_id": str(task.id),
+            "from_status": from_status,
+            "to_status": new_task_status.value,
+            "by_role": role.name,
+            "job_id": None,
+        })
+
+    # 2. Build resume context from the most recent failed instance of this role.
+    last_failed = db.scalar(
+        select(Instance)
+        .where(Instance.task_id == task_id)
+        .where(Instance.role_id == role.id)
+        .where(Instance.status == InstanceStatus.FAILED)
+        .order_by(Instance.finished_at.desc())
+        .limit(1)
+    )
+    job_payload: dict = {}
+    if last_failed is not None:
+        resume_ctx = _build_resume_context(last_failed.id)
+        if resume_ctx:
+            job_payload["resume_context"] = resume_ctx
+
     job = Job(
         task_id=task.id,
         role_id=role.id,
         priority=payload.priority,
         worker_id=payload.worker_id,
+        payload_json=job_payload or None,
     )
     db.add(job)
-    db.flush()  # populate id/created_at without ending the txn
+    db.flush()
     return job
 
 
