@@ -596,6 +596,9 @@ def _build_resume_context(instance_id: UUID) -> str | None:
 
     Returns None when there is nothing meaningful to extract.
     """
+    text_blocks: list[str] = []
+    tool_entries: list[str] = []
+
     with _db() as db:
         events = list(db.scalars(
             select(InstanceEvent)
@@ -604,30 +607,27 @@ def _build_resume_context(instance_id: UUID) -> str | None:
             .order_by(InstanceEvent.id.asc())
         ))
 
-    text_blocks: list[str] = []
-    tool_entries: list[str] = []
-
-    for ev in events:
-        p = ev.payload_json or {}
-        # Content can live at top level or nested under "message"
-        content = p.get("message", {}).get("content", []) if "message" in p else p.get("content", [])
-        if not isinstance(content, list):
-            continue
-        for blk in content:
-            if not isinstance(blk, dict):
+        for ev in events:
+            p = ev.payload_json or {}
+            # Content can live at top level or nested under "message"
+            content = p.get("message", {}).get("content", []) if "message" in p else p.get("content", [])
+            if not isinstance(content, list):
                 continue
-            btype = blk.get("type")
-            if btype == "text":
-                txt = (blk.get("text") or "").strip()
-                if len(txt) > 30:
-                    text_blocks.append(txt)
-            elif btype == "tool_use":
-                name = blk.get("name", "?")
-                inp = blk.get("input") or {}
-                cmd = inp.get("command", inp.get("pattern", inp.get("query", "")))
-                if not cmd:
-                    cmd = str(inp)[:80]
-                tool_entries.append(f"[{name}] {str(cmd)[:100]}")
+            for blk in content:
+                if not isinstance(blk, dict):
+                    continue
+                btype = blk.get("type")
+                if btype == "text":
+                    txt = (blk.get("text") or "").strip()
+                    if len(txt) > 30:
+                        text_blocks.append(txt)
+                elif btype == "tool_use":
+                    name = blk.get("name", "?")
+                    inp = blk.get("input") or {}
+                    cmd = inp.get("command", inp.get("pattern", inp.get("query", "")))
+                    if not cmd:
+                        cmd = str(inp)[:80]
+                    tool_entries.append(f"[{name}] {str(cmd)[:100]}")
 
     if not text_blocks and not tool_entries:
         return None
