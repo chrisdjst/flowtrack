@@ -30,25 +30,41 @@ from flowtrack.orchestrator import budget
 log = logging.getLogger(__name__)
 
 
+_SEVERITIES = ("P0-Critical", "P1-High", "P2-Medium", "P3-Low")
+_ROUTINGS = ("design_dev", "dev_only")
+
+
 @dataclass(slots=True, frozen=True)
 class RefinementResult:
     acceptance_criteria: str
     module_hint: str | None
-    recommendation: Literal["promote", "reject"]
+    recommendation: Literal["promote", "reject", "duplicate"]
     cost_usd: Decimal
+    severity: str = "P2-Medium"
+    pipeline_routing: str = "dev_only"
+    task_spec: str | None = None
+    # id-prefix of the open task this item duplicates; None when the model
+    # said duplicate but pointed at nothing we listed (human inspects).
+    duplicate_of: str | None = None
 
 
 _SCHEMA_HINT = """{
-  "acceptance_criteria": string  // numbered, testable criteria
-  "module_hint": string | null   // module name or null if unclear
-  "recommendation": "promote" | "reject"
+  "acceptance_criteria": string   // numbered, testable criteria
+  "module_hint": string | null    // module name or null if unclear
+  "recommendation": "promote" | "reject" | "duplicate"
+  "duplicate_of": string | null   // id of the OPEN TASK duplicated (only with recommendation=duplicate)
+  "severity": "P0-Critical" | "P1-High" | "P2-Medium" | "P3-Low"
+  "pipeline_routing": "design_dev" | "dev_only"
+  "task_spec": string             // markdown task spec (see rules)
 }"""
 
 
 def _build_prompt(*, title: str, summary: str | None, kind: str, source: str,
-                  source_ref: str, raw_payload: dict | None) -> str:
+                  source_ref: str, raw_payload: dict | None,
+                  existing_tasks: list[tuple[str, str]] | None = None) -> str:
     parts = [
-        "You are a Product Manager refining a discovered work item.",
+        "You are a Technical Product Manager refining a discovered work item "
+        "into a task specification.",
         "",
         f"Title: {title}",
         f"Source: {source} ({source_ref})",
@@ -58,6 +74,9 @@ def _build_prompt(*, title: str, summary: str | None, kind: str, source: str,
         parts += ["", "Summary:", summary[:2000]]
     if raw_payload:
         parts += ["", "Raw payload (truncated):", json.dumps(raw_payload)[:2000]]
+    if existing_tasks:
+        parts += ["", "Open tasks already in the backlog (id | title):"]
+        parts += [f"- {tid} | {ttitle[:120]}" for tid, ttitle in existing_tasks[:30]]
     parts += [
         "",
         "Respond with ONLY a JSON object — no prose, no markdown fences — "
@@ -70,7 +89,18 @@ def _build_prompt(*, title: str, summary: str | None, kind: str, source: str,
         "- module_hint: a single module/package name (e.g. 'auth', 'billing').",
         "  Use null when you can't infer it confidently.",
         "- recommendation='reject' for noise (transient errors, vague feature",
-        "  requests with no acceptance bar, duplicates).",
+        "  requests with no acceptance bar).",
+        "- recommendation='duplicate' ONLY when the item clearly describes the",
+        "  same defect/feature as one of the open tasks listed above; put that",
+        "  task's id in duplicate_of. When in doubt, promote — don't guess.",
+        "- severity: P0-Critical = security issue, data loss, or full outage;",
+        "  P1-High = major function broken with no workaround;",
+        "  P2-Medium = default for everything else; P3-Low = cosmetic/nice-to-have.",
+        "- pipeline_routing: 'design_dev' only when the work changes user-facing",
+        "  UI/UX and needs a design pass first; 'dev_only' otherwise.",
+        "- task_spec: a compact markdown spec with sections: ## Context (what/why,",
+        "  2-4 lines), ## Acceptance Criteria (same items as above), ## Out of",
+        "  Scope (1-3 explicit exclusions), ## Module Hints (paths/modules).",
     ]
     return "\n".join(parts)
 
@@ -116,6 +146,7 @@ async def refine_async(
     source: str,
     source_ref: str,
     raw_payload: dict | None = None,
+    existing_tasks: list[tuple[str, str]] | None = None,
     model: str = "sonnet",
     timeout_seconds: int = 90,
 ) -> RefinementResult:
@@ -123,10 +154,14 @@ async def refine_async(
 
     Idempotent: callers can retry safely (each call is a fresh session, no
     side effects beyond budget recording on success).
+
+    existing_tasks: (id-prefix, title) of open tasks, used for DUPLICATE
+    detection. Empty/None disables the duplicate branch in practice.
     """
     prompt = _build_prompt(
         title=title, summary=summary, kind=kind,
         source=source, source_ref=source_ref, raw_payload=raw_payload,
+        existing_tasks=existing_tasks,
     )
 
     # Allow injection of a fake executable for tests (mirrors spawner pattern).
@@ -185,11 +220,40 @@ async def refine_async(
     if "acceptance_criteria" not in result or "recommendation" not in result:
         raise RuntimeError(f"pm agent result missing required keys: {list(result.keys())}")
 
+    recommendation = result["recommendation"]
+    if recommendation not in ("promote", "reject", "duplicate"):
+        raise RuntimeError(f"pm agent returned unknown recommendation: {recommendation!r}")
+
+    # Lenient on the enrichment fields — a malformed value degrades to a safe
+    # default rather than failing the whole refinement.
+    severity = result.get("severity")
+    if severity not in _SEVERITIES:
+        severity = "P2-Medium"
+    routing = result.get("pipeline_routing")
+    if routing not in _ROUTINGS:
+        routing = "dev_only"
+
+    duplicate_of = result.get("duplicate_of") or None
+    if recommendation == "duplicate" and duplicate_of is not None:
+        known_ids = {tid for tid, _ in (existing_tasks or [])}
+        if duplicate_of not in known_ids:
+            # Model pointed at something we never listed — keep the duplicate
+            # verdict but drop the bogus ref so a human resolves it.
+            log.warning(
+                "pm agent: duplicate_of=%r not among listed tasks — clearing ref",
+                duplicate_of,
+            )
+            duplicate_of = None
+
     parsed = RefinementResult(
         acceptance_criteria=result["acceptance_criteria"],
         module_hint=result.get("module_hint") or None,
-        recommendation=result["recommendation"],
+        recommendation=recommendation,
         cost_usd=cost,
+        severity=severity,
+        pipeline_routing=routing,
+        task_spec=result.get("task_spec") or None,
+        duplicate_of=duplicate_of,
     )
 
     # Record spend so the global cap reflects PM agent usage too.

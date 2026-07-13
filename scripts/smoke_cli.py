@@ -129,7 +129,8 @@ from flowtrack.agents import pm as _pm  # noqa: E402
 
 
 async def _fake_refine(*, title, summary, kind, source, source_ref,
-                       raw_payload=None, model="sonnet", timeout_seconds=90):  # noqa: ARG001
+                       raw_payload=None, existing_tasks=None,
+                       model="sonnet", timeout_seconds=90):  # noqa: ARG001
     return _pm.RefinementResult(
         acceptance_criteria="1. CLI smoke acceptance criteria (mocked).",
         module_hint="cli-smoke",

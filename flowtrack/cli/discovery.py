@@ -19,7 +19,12 @@ from sqlalchemy import select
 from flowtrack.core.console import console
 from flowtrack.core.database import get_db
 from flowtrack.core.exceptions import FlowTrackError
-from flowtrack.discovery.promote import promote_item, reject_item
+from flowtrack.discovery.promote import (
+    duplicate_item,
+    open_tasks_snapshot,
+    promote_item,
+    reject_item,
+)
 from flowtrack.models import DiscoveredItem
 from flowtrack.models.discovered_item import DiscoveryStatus
 
@@ -223,6 +228,7 @@ def refine(
             "source": item.source.value,
             "source_ref": item.source_ref or "",
             "raw_payload": item.raw_payload,
+            "existing_tasks": open_tasks_snapshot(db),
         }
         item_status = item.status
 
@@ -235,11 +241,19 @@ def refine(
 
     rec_color = "green" if result.recommendation == "promote" else "yellow"
     console.print(f"  Recommendation: [{rec_color}]{result.recommendation}[/{rec_color}]")
+    if result.recommendation == "duplicate":
+        console.print(f"  Duplicate of:   {result.duplicate_of or '(unresolved — inspect manually)'}")
+    console.print(f"  Severity:       {result.severity}")
+    console.print(f"  Routing:        {result.pipeline_routing}")
     console.print(f"  Module hint:    {result.module_hint or '(none)'}")
     console.print(f"  Cost:           ${result.cost_usd}")
     console.print()
     console.print("[bold]Acceptance criteria:[/bold]")
     console.print(result.acceptance_criteria)
+    if result.task_spec:
+        console.print()
+        console.print("[bold]Task spec:[/bold]")
+        console.print(result.task_spec)
 
     if not apply:
         console.print()
@@ -258,10 +272,19 @@ def refine(
                     db, item,
                     acceptance_criteria=result.acceptance_criteria,
                     module_hint=result.module_hint,
+                    severity=result.severity,
+                    pipeline_routing=result.pipeline_routing,
+                    task_spec=result.task_spec,
                 )
                 console.print(
                     f"[green]Applied: promoted -> task {str(task.id)[:8]} "
-                    f"(criteria + module_hint filled)[/green]"
+                    f"(spec + severity + routing filled)[/green]"
+                )
+            elif result.recommendation == "duplicate":
+                duplicate_item(db, item, duplicate_of=result.duplicate_of)
+                console.print(
+                    f"[yellow]Applied: marked duplicate"
+                    f"{f' of {result.duplicate_of}' if result.duplicate_of else ''}[/yellow]"
                 )
             else:
                 reject_item(db, item, reason="pm: refine recommended reject")

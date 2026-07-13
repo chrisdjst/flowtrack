@@ -21,7 +21,12 @@ from flowtrack.core.database import SessionLocal
 from flowtrack.core.runtime_config import RuntimeConfig
 from flowtrack.core.settings import settings
 from flowtrack.discovery.base import DiscoveryCandidate, DiscoveryWorker
-from flowtrack.discovery.promote import promote_item, reject_item
+from flowtrack.discovery.promote import (
+    duplicate_item,
+    open_tasks_snapshot,
+    promote_item,
+    reject_item,
+)
 from flowtrack.discovery.sources.github_issues import GitHubIssuesSource
 from flowtrack.discovery.sources.jira_backlog import JiraBacklogSource
 from flowtrack.discovery.sources.sentry import SentryIssuesSource
@@ -153,6 +158,7 @@ async def _auto_refine(item_id: UUID) -> None:
             "source": item.source.value,
             "source_ref": item.source_ref or "",
             "raw_payload": item.raw_payload,
+            "existing_tasks": open_tasks_snapshot(db),
         }
     finally:
         db.close()
@@ -174,6 +180,9 @@ async def _auto_refine(item_id: UUID) -> None:
                     db, item,
                     acceptance_criteria=result.acceptance_criteria,
                     module_hint=result.module_hint,
+                    severity=result.severity,
+                    pipeline_routing=result.pipeline_routing,
+                    task_spec=result.task_spec,
                 )
                 broker.publish_sync("discovered_item_promoted", {
                     "item_id": str(item.id),
@@ -186,6 +195,14 @@ async def _auto_refine(item_id: UUID) -> None:
                 broker.publish_sync("discovered_item_rejected", {
                     "item_id": str(item.id),
                     "title": item.title,
+                    "by": "auto_refine",
+                })
+            elif result.recommendation == "duplicate":
+                duplicate_item(db, item, duplicate_of=result.duplicate_of)
+                broker.publish_sync("discovered_item_duplicate", {
+                    "item_id": str(item.id),
+                    "title": item.title,
+                    "duplicate_of": result.duplicate_of,
                     "by": "auto_refine",
                 })
         except ValueError:

@@ -81,6 +81,7 @@ async def refine(item_id: UUID, db: Session = Depends(db_session)) -> dict:
     money so the API is explicit.
     """
     from flowtrack.agents.pm import refine_async
+    from flowtrack.discovery.promote import open_tasks_snapshot
 
     item = db.get(DiscoveredItem, item_id)
     if item is None:
@@ -93,6 +94,7 @@ async def refine(item_id: UUID, db: Session = Depends(db_session)) -> dict:
             source=item.source.value,
             source_ref=item.source_ref or "",
             raw_payload=item.raw_payload,
+            existing_tasks=open_tasks_snapshot(db),
         )
     except Exception as e:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=str(e))
@@ -106,6 +108,10 @@ async def refine(item_id: UUID, db: Session = Depends(db_session)) -> dict:
         "acceptance_criteria": result.acceptance_criteria,
         "module_hint": result.module_hint,
         "recommendation": result.recommendation,
+        "duplicate_of": result.duplicate_of,
+        "severity": result.severity,
+        "pipeline_routing": result.pipeline_routing,
+        "task_spec": result.task_spec,
         "cost_usd": str(result.cost_usd),
     }
 
