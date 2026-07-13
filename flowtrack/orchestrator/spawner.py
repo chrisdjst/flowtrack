@@ -36,6 +36,7 @@ from flowtrack.models import Instance, InstanceEvent, Job, Role, Task, TaskComme
 from flowtrack.models.instance import InstanceStatus
 from flowtrack.models.instance_event import InstanceEventType
 from flowtrack.models.job import JobStatus
+from flowtrack.models.session import SessionType
 from flowtrack.models.task import BlockedReason, TaskStatus
 from flowtrack.integrations.jira_sync import push_task_status
 from flowtrack.orchestrator import hooks, locks, merger, worktree
@@ -253,6 +254,15 @@ def _try_acquire_locks(instance_id: UUID, keys: list[str], role_max_minutes: int
         return ok
 
 
+# SPACE metrics: which SessionType an agent role's run is recorded as.
+# reviewer feeds avg_review_duration, qa feeds test_sessions; everything
+# else (dev, devops, design, pm, po) is development work.
+_ROLE_SESSION_TYPES: dict[str, SessionType] = {
+    "reviewer": SessionType.REVIEW,
+    "qa": SessionType.TESTING,
+}
+
+
 def _mark_running(instance_id: UUID, *, wt_path: str, branch: str) -> None:
     with _db() as db:
         inst = db.get(Instance, instance_id)
@@ -263,6 +273,30 @@ def _mark_running(instance_id: UUID, *, wt_path: str, branch: str) -> None:
         inst.status = InstanceStatus.RUNNING
         inst.claude_session_id = str(instance_id)  # 1:1 with our instance id
         inst.last_heartbeat_at = datetime.now(tz=timezone.utc)
+
+        # KAN-41: every agent run is a FlowTrack session, so autonomous work
+        # lands in SPACE/DORA through the exact same rows as `flowtrack dev
+        # start`. instance_id ownership keeps it out of the CLI's
+        # one-active-session invariant. Naive datetime like the CLI's repo —
+        # the report subtracts these against CLI timestamps.
+        from flowtrack.repositories.session_repo import SessionRepository
+
+        role = db.get(Role, inst.role_id)
+        task = db.get(Task, inst.task_id) if inst.task_id else None
+        session = SessionRepository(db).create(
+            _ROLE_SESSION_TYPES.get(role.name if role else "", SessionType.DEVELOPMENT),
+            ticket_id=task.ticket_id if task is not None else None,
+            instance_id=instance_id,
+        )
+        inst.session_id = session.id
+
+
+def _end_agent_session(db: Session, instance_id: UUID) -> None:
+    """Close the instance-owned session on any terminal path. The watchdog
+    calls the same repo method for instances whose supervisor crashed."""
+    from flowtrack.repositories.session_repo import SessionRepository
+
+    SessionRepository(db).end_for_instance(instance_id)
 
 
 def _attach_pid(instance_id: UUID, pid: int) -> None:
@@ -289,6 +323,7 @@ def _finalize(
             inst.exit_code = exit_code
             inst.finished_at = datetime.now(tz=timezone.utc)
             task_id_for_event = inst.task_id
+        _end_agent_session(db, instance_id)
         locks.release_all(db, instance_id=instance_id)
         job = db.get(Job, job_id)
         if job is not None:
@@ -357,6 +392,12 @@ def _block_task(
     from_status = task.status.value if task.status else None
     task.status = TaskStatus.BLOCKED
     task.blocked_reason = blocked_reason
+    if blocked_reason == BlockedReason.INFRA_FAILURE:
+        # KAN-41: infra blocks are DORA incidents — opened here, resolved
+        # when the block clears (devops success or human unblock) = MTTR.
+        from flowtrack.services.incident_service import open_pipeline_incident
+
+        open_pipeline_incident(db, task_id=task.id, reason=reason)
     push_task_status(task.ticket_id, task.status.value)
     db.add(TaskTransition(
         task_id=task.id, from_status=from_status, to_status=task.status.value,
@@ -689,6 +730,11 @@ def _advance_pipeline(
     # the human unblock path resets it.
     if task.blocked_reason is not None:
         task.blocked_reason = None
+        # Infra block survived until a stage completed past it (devops arc):
+        # close the matching pipeline incident — this timestamp is the MTTR.
+        from flowtrack.services.incident_service import resolve_pipeline_incidents
+
+        resolve_pipeline_incidents(db, task.id)
 
     # Merge & deploy stage (KAN-40): opt-in diversion of qa's success chain.
     # Gated in code (not seeded on the role row) so merge_enabled=false keeps
@@ -920,6 +966,9 @@ def _handle_nonzero_exit(instance_id: UUID, job_id: UUID, rc: int) -> None:
             inst.exit_code = rc
             inst.finished_at = datetime.now(tz=timezone.utc)
             task_id_snapshot = inst.task_id
+        # A requeued attempt spawns a fresh instance and thus a fresh session;
+        # each run is measured on its own.
+        _end_agent_session(db, instance_id)
         locks.release_all(db, instance_id=instance_id)
         job = db.get(Job, job_id)
         if job is not None:

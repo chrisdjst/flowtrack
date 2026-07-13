@@ -27,9 +27,19 @@ class IncidentRepository:
         return incident
 
     def get_active(self) -> Incident | None:
+        """The human's open CLI incident. Pipeline-opened incidents (marked
+        by the '[pipeline]' description prefix) are excluded so `flowtrack
+        incident end` never resolves an agent's infra incident by accident —
+        those are resolved by the pipeline itself (see spawner)."""
+        from sqlalchemy import or_
+
         return (
             self.db.query(Incident)
             .filter(Incident.resolved_at.is_(None))
+            .filter(or_(
+                Incident.description.is_(None),
+                ~Incident.description.like("[pipeline]%"),
+            ))
             .order_by(Incident.started_at.desc())
             .first()
         )

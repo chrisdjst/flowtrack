@@ -307,7 +307,9 @@ def _finalize_success(
             environment = Environment.DEVELOPMENT
         db.add(Deployment(
             environment=environment,
-            deployed_at=datetime.now(tz=timezone.utc),
+            # Naive local time on purpose: the report subtracts deployed_at
+            # against CLI-recorded session timestamps, which are naive local.
+            deployed_at=datetime.now(),
             commit_sha=commit_sha,
             ticket_id=task.ticket_id,
         ))

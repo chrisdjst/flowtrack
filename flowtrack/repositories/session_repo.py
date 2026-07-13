@@ -15,6 +15,7 @@ class SessionRepository:
         session_type: SessionType,
         ticket_id: str | None = None,
         pr_number: int | None = None,
+        instance_id: uuid.UUID | None = None,
     ) -> Session:
         session = Session(
             type=session_type,
@@ -22,15 +23,21 @@ class SessionRepository:
             pr_number=pr_number,
             started_at=datetime.now(),
             status=SessionStatus.ACTIVE,
+            instance_id=instance_id,
         )
         self.db.add(session)
         self.db.flush()
         return session
 
     def get_active(self) -> Session | None:
+        """The human's active CLI session. Agent sessions (instance_id set)
+        are excluded: they run concurrently and are owned by their instance,
+        so they must never satisfy — or violate — the CLI's one-active-session
+        invariant."""
         return (
             self.db.query(Session)
             .filter(Session.status.in_([SessionStatus.ACTIVE, SessionStatus.PAUSED]))
+            .filter(Session.instance_id.is_(None))
             .first()
         )
 
@@ -41,6 +48,21 @@ class SessionRepository:
         session.status = SessionStatus.ENDED
         session.ended_at = datetime.now()
         self.db.flush()
+        return session
+
+    def end_for_instance(self, instance_id: uuid.UUID) -> Session | None:
+        """Close an instance-owned agent session on any terminal path
+        (spawner finalize, nonzero exit, watchdog kill). No-op when the
+        instance never reached RUNNING (no session was created)."""
+        session = (
+            self.db.query(Session)
+            .filter(Session.instance_id == instance_id)
+            .filter(Session.status != SessionStatus.ENDED)
+            .first()
+        )
+        if session is not None:
+            session.status = SessionStatus.ENDED
+            session.ended_at = datetime.now()
         return session
 
     def pause(self, session: Session) -> Session:

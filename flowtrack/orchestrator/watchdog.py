@@ -30,6 +30,7 @@ from flowtrack.models.instance import InstanceStatus
 from flowtrack.models.job import JobStatus
 from flowtrack.orchestrator import locks
 from flowtrack.orchestrator.queue import release_job
+from flowtrack.repositories.session_repo import SessionRepository
 
 log = logging.getLogger(__name__)
 
@@ -106,6 +107,9 @@ def _kill_stale_instances(db: Session) -> int:
         )
         inst.status = InstanceStatus.KILLED
         inst.finished_at = now
+        # KAN-41: the crashed supervisor never ended the agent session; a
+        # dangling ACTIVE session would inflate SPACE flow-time forever.
+        SessionRepository(db).end_for_instance(inst.id)
         locks.release_all(db, instance_id=inst.id)
 
         # Best-effort: fail any job still attached to this instance.

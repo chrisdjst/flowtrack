@@ -22,6 +22,7 @@ from flowtrack.models.instance import InstanceStatus
 from flowtrack.models.instance_event import InstanceEventType
 from flowtrack.models.task import BlockedReason, TaskStatus
 from flowtrack.orchestrator.spawner import _AWAIT_APPROVAL_REASON, _REQUEST_CHANGES_REASON, _build_resume_context
+from flowtrack.services.incident_service import resolve_pipeline_incidents
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -191,6 +192,7 @@ def assign_task(
             # Manual assign out of blocked = human unblock: fresh bounce budget.
             task.blocked_reason = None
             task.bounce_count = 0
+            resolve_pipeline_incidents(db, task.id)
         push_task_status(task.ticket_id, new_task_status.value)
         db.add(TaskTransition(
             task_id=task.id,
@@ -262,6 +264,7 @@ def advance_task_status(
         # grant a fresh bounce budget.
         task.blocked_reason = None
         task.bounce_count = 0
+        resolve_pipeline_incidents(db, task.id)
     push_task_status(task.ticket_id, new_status.value)
     db.add(TaskTransition(
         task_id=task.id,
@@ -349,6 +352,7 @@ def approve_return_to_dev(
     task.status = TaskStatus.IN_PROGRESS
     task.blocked_reason = None
     task.bounce_count = 0
+    resolve_pipeline_incidents(db, task.id)
     push_task_status(task.ticket_id, task.status.value)
     db.add(TaskTransition(
         task_id=task.id,
