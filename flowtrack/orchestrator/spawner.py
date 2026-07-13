@@ -324,6 +324,13 @@ _ROLE_VERDICTS: dict[str, tuple[tuple[str, str], ...]] = {
         ("BLOCKED", "infra"),
         ("PASS", "success"),
     ),
+    # devops: RESOLVED re-verifies via the seeded chain (-> qa); BLOCKED means
+    # the RCA-fix-verify loop is exhausted -> human. No 'failure' outcome —
+    # there is no earlier stage to bounce an infra problem back to.
+    "devops": (
+        ("BLOCKED", "human"),
+        ("RESOLVED", "success"),
+    ),
 }
 
 # Which role works a task at a given status — used to enqueue the rework job

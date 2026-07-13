@@ -113,6 +113,19 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
         "type": "int", "default": 3, "group": "po", "sensitive": False,
         "description": "Maximum ready tasks the PO admits per sweep.",
     },
+    # ---------- devops ----------
+    "devops_auto_pickup": {
+        "type": "bool", "default": False, "group": "devops", "sensitive": False,
+        "description": "DevOps agent automatically picks up tasks blocked with blocked_reason=infra_failure.",
+    },
+    "devops_pickup_interval_seconds": {
+        "type": "int", "default": 60, "group": "devops", "sensitive": False,
+        "description": "Seconds between DevOps pickup sweeps (when devops_auto_pickup is on).",
+    },
+    "devops_pickup_batch": {
+        "type": "int", "default": 2, "group": "devops", "sensitive": False,
+        "description": "Maximum infra-blocked tasks the DevOps agent picks up per sweep.",
+    },
     # ---------- discovery ----------
     "github_discovery_label": {
         "type": "str", "default": "bot-pickup", "group": "discovery", "sensitive": False,

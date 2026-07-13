@@ -27,6 +27,7 @@ from flowtrack.api.routers import budget, discovery, instances, kanban, roles_ro
 from flowtrack.core.runtime_config import RuntimeConfig
 from flowtrack.core.sentry import init_sentry
 from flowtrack.core.settings import settings
+from flowtrack.agents.devops import run_devops_pickup
 from flowtrack.agents.po import run_po_admission
 from flowtrack.discovery.manager import run_discovery_manager
 from flowtrack.orchestrator.loop import run_orchestrator
@@ -52,6 +53,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(broker.run_broadcaster(stop_event), name="ws-broadcaster"),
         asyncio.create_task(run_discovery_manager(stop_event), name="discovery-manager"),
         asyncio.create_task(run_po_admission(stop_event), name="po-admission"),
+        asyncio.create_task(run_devops_pickup(stop_event), name="devops-pickup"),
     ]
     try:
         yield
