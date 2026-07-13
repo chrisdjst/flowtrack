@@ -20,7 +20,7 @@ from flowtrack.integrations.jira_sync import push_task_status
 from flowtrack.models import Instance, InstanceEvent, Job, Role, Task, TaskComment, TaskTransition
 from flowtrack.models.instance import InstanceStatus
 from flowtrack.models.instance_event import InstanceEventType
-from flowtrack.models.task import TaskStatus
+from flowtrack.models.task import BlockedReason, TaskStatus
 from flowtrack.orchestrator.spawner import _AWAIT_APPROVAL_REASON, _REQUEST_CHANGES_REASON, _build_resume_context
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
@@ -187,6 +187,10 @@ def assign_task(
     from_status = task.status.value if task.status else None
     if new_task_status and task.status != new_task_status:
         task.status = new_task_status
+        if new_task_status != TaskStatus.BLOCKED and task.blocked_reason is not None:
+            # Manual assign out of blocked = human unblock: fresh bounce budget.
+            task.blocked_reason = None
+            task.bounce_count = 0
         push_task_status(task.ticket_id, new_task_status.value)
         db.add(TaskTransition(
             task_id=task.id,
@@ -253,6 +257,11 @@ def advance_task_status(
 
     from_status = task.status.value if task.status else None
     task.status = new_status
+    if new_status != TaskStatus.BLOCKED and task.blocked_reason is not None:
+        # Human moved the task out of blocked: clear the block metadata and
+        # grant a fresh bounce budget.
+        task.blocked_reason = None
+        task.bounce_count = 0
     push_task_status(task.ticket_id, new_status.value)
     db.add(TaskTransition(
         task_id=task.id,
@@ -302,10 +311,12 @@ def approve_return_to_dev(
     task_id: UUID,
     db: Session = Depends(db_session),
 ) -> AdvanceTaskResponse:
-    """Human approval: allow a task blocked at 2nd+ reviewer cycle to go back to dev.
+    """Human approval: allow a task blocked for manual intervention to go back to dev.
 
-    Only valid when the task is BLOCKED and the last transition reason is the
-    awaiting-approval sentinel. Enqueues a dev Job and transitions to IN_PROGRESS.
+    Valid when the task is BLOCKED with blocked_reason=manual_intervention
+    (bounce cap / NEEDS_HUMAN), or — legacy, pre-migration-010 rows — when the
+    last transition reason is the awaiting-approval sentinel. Enqueues a dev
+    Job, transitions to IN_PROGRESS and resets the bounce budget.
     """
     task = db.get(Task, task_id)
     if task is None:
@@ -317,17 +328,18 @@ def approve_return_to_dev(
             detail="task is not blocked — nothing to approve",
         )
 
-    last_transition = db.scalar(
-        select(TaskTransition)
-        .where(TaskTransition.task_id == task_id)
-        .order_by(TaskTransition.transitioned_at.desc())
-        .limit(1)
-    )
-    if last_transition is None or last_transition.reason != _AWAIT_APPROVAL_REASON:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            detail="task is not awaiting reviewer-cycle approval",
+    if task.blocked_reason != BlockedReason.MANUAL_INTERVENTION:
+        last_transition = db.scalar(
+            select(TaskTransition)
+            .where(TaskTransition.task_id == task_id)
+            .order_by(TaskTransition.transitioned_at.desc())
+            .limit(1)
         )
+        if last_transition is None or last_transition.reason != _AWAIT_APPROVAL_REASON:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail="task is not awaiting human approval",
+            )
 
     dev_role = db.scalar(select(Role).where(Role.name == "dev"))
     if dev_role is None:
@@ -335,6 +347,8 @@ def approve_return_to_dev(
 
     from_status = task.status.value
     task.status = TaskStatus.IN_PROGRESS
+    task.blocked_reason = None
+    task.bounce_count = 0
     push_task_status(task.ticket_id, task.status.value)
     db.add(TaskTransition(
         task_id=task.id,
@@ -344,7 +358,7 @@ def approve_return_to_dev(
     ))
     db.add(TaskComment(
         task_id=task.id,
-        body="Human approved return to dev after repeated reviewer cycle.",
+        body="Human approved return to dev. Bounce budget reset.",
     ))
     job = Job(task_id=task.id, role_id=dev_role.id, priority=50)
     db.add(job)

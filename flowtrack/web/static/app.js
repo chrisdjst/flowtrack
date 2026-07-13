@@ -642,6 +642,8 @@ function connectWS() {
       case "hook_received":
       case "reviewer_request_changes":
       case "reviewer_needs_human":
+      case "role_failure_routed":
+      case "task_blocked":
         scheduleRefresh(100);
         break;
       case "reviewer_return_approval_needed":
@@ -912,6 +914,16 @@ const roles = {
         <input type="text" class="role-input role-status-success" value="${r.task_status_on_success ?? ""}">
       </div>
     </div>
+    <div class="role-field role-field-row">
+      <div>
+        <label>Status on failure <span class="role-hint">(vazio=blocked)</span></label>
+        <input type="text" class="role-input role-status-failure" value="${r.task_status_on_failure ?? ""}">
+      </div>
+      <div>
+        <label>Max bounces <span class="role-hint">(vazio=∞)</span></label>
+        <input type="number" class="role-input role-max-bounces" min="0" max="20" value="${r.max_bounce_count ?? ""}">
+      </div>
+    </div>
     <div class="role-actions">
       <button class="role-save-btn" data-role="${r.name}">✓ Salvar</button>
       <button class="role-cancel-btn" data-role="${r.name}">Cancelar</button>
@@ -944,6 +956,11 @@ const roles = {
       system_prompt: card.querySelector(".role-system-prompt").value,
       next_role_name: card.querySelector(".role-next-role").value.trim() || null,
       task_status_on_success: card.querySelector(".role-status-success").value.trim() || null,
+      task_status_on_failure: card.querySelector(".role-status-failure").value.trim() || null,
+      max_bounce_count: (() => {
+        const raw = card.querySelector(".role-max-bounces").value.trim();
+        return raw === "" ? null : parseInt(raw, 10);
+      })(),
     };
 
     try {

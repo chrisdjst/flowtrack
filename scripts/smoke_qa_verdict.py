@@ -1,14 +1,16 @@
-"""Smoke for reviewer's REQUEST_CHANGES and NEEDS_HUMAN branches.
+"""Smoke for QA's verdict branches (FAIL and BLOCKED).
 
-Mock honours FLOWTRACK_CLAUDE_MOCK_VERDICT — the spawner inherits the
-daemon's env, so the same env value goes to every spawn this run. Dev
-doesn't care; reviewer's branching code triggers.
+Per-role mock verdicts (FLOWTRACK_CLAUDE_MOCK_VERDICT_<ROLE>) let the
+reviewer APPROVE while QA rejects in the same run.
 
 Scenarios:
-  - REQUEST_CHANGES: dev runs, reviewer runs and writes verdict, task is
-    sent back to dev (status=in_progress), a fresh dev job is enqueued in
-    the same lane.
-  - NEEDS_HUMAN: same setup, task ends in 'blocked' with a comment.
+  - FAIL: dev -> reviewer (approve) -> qa FAIL -> task back to in_progress
+    (qa.task_status_on_failure), bounce_count incremented, dev job enqueued,
+    and — since code changes — the rework re-enters at REVIEWER, not qa.
+  - BLOCKED: same chain, qa says BLOCKED -> task blocked with
+    blocked_reason=infra_failure (DevOps pickup bucket, not a code bounce).
+
+Cost: $0 (mock claude).
 """
 
 from __future__ import annotations
@@ -47,27 +49,20 @@ async def cleanup() -> None:
             await p.wait()
     if WORKTREES.exists():
         shutil.rmtree(WORKTREES, ignore_errors=True)
-    # Locks left behind by previous aborted scenarios.
     from sqlalchemy import delete
     from flowtrack.core.database import SessionLocal
     from flowtrack.models import ResourceLock
     db = SessionLocal()
     try:
-        db.execute(delete(ResourceLock).where(ResourceLock.resource_key.like("module:smoke-rev%")))
+        db.execute(delete(ResourceLock).where(ResourceLock.resource_key.like("module:smoke-qa%")))
         db.commit()
     finally:
         db.close()
 
 
-async def _drive_scenario(verdict: str) -> tuple[bool, dict]:
-    """Spin up a fresh orchestrator process per scenario so env var changes
-    apply. Each scenario uses its own worker lane AND module_hint so the
-    resource lock from one scenario can't block the other.
-
-    Returns (ok, diagnostic_dict).
-    """
-    worker_id = f"smoke-rev-{verdict.lower()}-{_uuid.uuid4().hex[:6]}"
-    module_hint = f"smoke-rev-{verdict.lower()}-{_uuid.uuid4().hex[:6]}"
+async def _drive_scenario(qa_verdict: str) -> tuple[bool, dict]:
+    worker_id = f"smoke-qa-{qa_verdict.lower()}-{_uuid.uuid4().hex[:6]}"
+    module_hint = f"smoke-qa-{qa_verdict.lower()}-{_uuid.uuid4().hex[:6]}"
 
     env = {
         **os.environ,
@@ -79,10 +74,13 @@ async def _drive_scenario(verdict: str) -> tuple[bool, dict]:
         "FLOWTRACK_TARGET_REPO_PATH": str(REPO),
         "FLOWTRACK_WORKTREE_ROOT": str(WORKTREES),
         "FLOWTRACK_WORKER_ID": worker_id,
-        "FLOWTRACK_CLAUDE_MOCK_VERDICT": verdict,
+        "FLOWTRACK_CLAUDE_MOCK_VERDICT_REVIEWER": "APPROVE",
+        "FLOWTRACK_CLAUDE_MOCK_VERDICT_QA": qa_verdict,
     }
 
-    # Run the driver inline via a subprocess so it picks up the env above.
+    # FAIL: stop once a 2nd reviewer job appears (rework re-entered review)
+    # or the task blocks (would be a FAIL-branch bug). BLOCKED: stop at
+    # status=blocked.
     code = f"""
 import asyncio
 from sqlalchemy import select, func
@@ -97,8 +95,8 @@ async def main():
     try:
         dev_id = db.scalar(select(Role.id).where(Role.name == 'dev'))
         rev_id = db.scalar(select(Role.id).where(Role.name == 'reviewer'))
-        t = Task(title='reviewer-smoke {verdict}', status=TaskStatus.TODO,
-                 priority=TaskPriority.HIGH, ticket_id='SMOKE-REV-{verdict}',
+        t = Task(title='qa-verdict smoke {qa_verdict}', status=TaskStatus.TODO,
+                 priority=TaskPriority.HIGH, ticket_id='SMOKE-QA-{qa_verdict}',
                  module_hint='{module_hint}', acceptance_criteria='ok')
         db.add(t); db.flush()
         task_id = t.id
@@ -112,21 +110,18 @@ async def main():
     stop = asyncio.Event()
     runner = asyncio.create_task(run_orchestrator(stop))
 
-    # Wait until: task in (blocked, done) OR we observe 2+ dev jobs (the
-    # request_changes branch enqueued a re-do). 60s ceiling.
-    for _ in range(120):
+    for _ in range(240):
         await asyncio.sleep(0.5)
         db = SessionLocal()
         try:
             status = db.scalar(select(Task.status).where(Task.id == task_id))
-            dev_count = db.scalar(
+            rev_count = db.scalar(
                 select(func.count(Job.id)).where(
-                    Job.task_id == task_id, Job.role_id == dev_id
+                    Job.task_id == task_id, Job.role_id == rev_id
                 )
             )
-            if (status and status.value in ('blocked', 'done')) or (dev_count or 0) >= 2:
-                # Give the chain another beat to flush transitions/comments.
-                await asyncio.sleep(2.0)
+            if (status and status.value in ('blocked', 'done')) or (rev_count or 0) >= 2:
+                await asyncio.sleep(1.5)
                 break
         finally:
             db.close()
@@ -161,10 +156,10 @@ asyncio.run(main())
     if err_str and ("Error" in err_str or "Traceback" in err_str):
         print(f"  subprocess stderr: {err_str[:800]}")
 
-    # Inspect from this process.
     from sqlalchemy import select
     from flowtrack.core.database import SessionLocal
-    from flowtrack.models import Instance, Job, Role, Task, TaskComment, TaskTransition
+    from flowtrack.models import Job, Role, Task, TaskTransition
+    from flowtrack.models.task import BlockedReason
 
     db = SessionLocal()
     try:
@@ -173,43 +168,39 @@ asyncio.run(main())
         jobs = list(db.scalars(
             select(Job).where(Job.task_id == task_id).order_by(Job.created_at)
         ))
-        instances = list(db.scalars(
-            select(Instance).where(Instance.task_id == task_id).order_by(Instance.spawned_at)
-        ))
         transitions = list(db.scalars(
             select(TaskTransition).where(TaskTransition.task_id == task_id)
             .order_by(TaskTransition.transitioned_at)
         ))
-        comments = list(db.scalars(
-            select(TaskComment).where(TaskComment.task_id == task_id)
-        ))
+        job_roles = [roles_by_id[j.role_id] for j in jobs]
         diag = {
-            "verdict": verdict,
+            "qa_verdict": qa_verdict,
             "task_status": task.status.value,
+            "blocked_reason": task.blocked_reason.value if task.blocked_reason else None,
+            "bounce_count": task.bounce_count,
             "jobs": [(roles_by_id[j.role_id], j.status.value) for j in jobs],
-            "instances": [(roles_by_id[i.role_id], i.status.value) for i in instances],
             "transitions": [(t.from_status, t.to_status, t.reason) for t in transitions],
-            "comment_count": len(comments),
         }
     finally:
         db.close()
 
-    if verdict == "REQUEST_CHANGES":
+    if qa_verdict == "FAIL":
         ok = (
-            task.status.value in ("in_progress", "in_review", "in_qa", "done")
-            # Specifically: there should be at least 2 dev jobs in the lane.
-            and sum(1 for r, _ in diag["jobs"] if r == "dev") >= 2
-            and any(t for t in transitions if t.reason and "REQUEST_CHANGES" in t.reason)
-            and any("REQUEST_CHANGES" in (c.body or "") for c in comments)
+            any(t.reason == "qa: FAIL" and t.to_status == "in_progress" for t in transitions)
+            and task.bounce_count >= 1
+            and task.blocked_reason is None
+            # rework chain re-enters at reviewer: dev, reviewer, qa, dev, reviewer
+            and job_roles.count("dev") >= 2
+            and job_roles.count("reviewer") >= 2
         )
-    elif verdict == "NEEDS_HUMAN":
+    else:  # BLOCKED
         ok = (
             task.status.value == "blocked"
-            and any(t for t in transitions if t.reason and "NEEDS_HUMAN" in t.reason)
-            and any("NEEDS_HUMAN" in (c.body or "") for c in comments)
+            and task.blocked_reason == BlockedReason.INFRA_FAILURE
+            and any(t.reason == "qa: BLOCKED" for t in transitions)
+            # infra block is NOT a code bounce
+            and task.bounce_count == 0
         )
-    else:
-        ok = False
     return ok, diag
 
 
@@ -217,15 +208,12 @@ async def main() -> int:
     await cleanup()
     overall_ok = True
 
-    for verdict in ("REQUEST_CHANGES", "NEEDS_HUMAN"):
-        ok, diag = await _drive_scenario(verdict)
+    for qa_verdict in ("FAIL", "BLOCKED"):
+        ok, diag = await _drive_scenario(qa_verdict)
         print()
-        print(f"=== {verdict} ===")
-        print(f"  task_status   = {diag.get('task_status')}")
-        print(f"  jobs          = {diag.get('jobs')}")
-        print(f"  instances     = {diag.get('instances')}")
-        print(f"  transitions   = {diag.get('transitions')}")
-        print(f"  comment_count = {diag.get('comment_count')}")
+        print(f"=== QA {qa_verdict} ===")
+        for k, v in diag.items():
+            print(f"  {k} = {v}")
         print(f"  -> {'PASS' if ok else 'FAIL'}")
         overall_ok = overall_ok and ok
 

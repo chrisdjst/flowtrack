@@ -29,6 +29,13 @@ class Role(TimestampMixin, Base):
     # NULL on either field = pipeline ends here.
     next_role_name: Mapped[str | None] = mapped_column(String(50))
     task_status_on_success: Mapped[str | None] = mapped_column(String(50))
+    # Where the task goes when this role fails. NULL = blocked (legacy default).
+    # e.g. reviewer REQUEST_CHANGES routes back to in_progress for a dev retry.
+    task_status_on_failure: Mapped[str | None] = mapped_column(String(50))
+    # How many failure-routings a task tolerates before the orchestrator forces
+    # blocked (manual_intervention) regardless of task_status_on_failure.
+    # NULL = no cap. Compared against tasks.bounce_count.
+    max_bounce_count: Mapped[int | None] = mapped_column(default=None)
     updated_at: Mapped[datetime] = mapped_column(
         server_default=func.now(), onupdate=func.now()
     )

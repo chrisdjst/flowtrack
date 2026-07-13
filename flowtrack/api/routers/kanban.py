@@ -12,7 +12,7 @@ from flowtrack.api.schemas import (
 from flowtrack.models import DiscoveredItem, Instance, Role, Task, TaskTransition
 from flowtrack.models.discovered_item import DiscoveryStatus
 from flowtrack.models.instance import InstanceStatus
-from flowtrack.models.task import TaskStatus
+from flowtrack.models.task import BlockedReason, TaskStatus
 from flowtrack.orchestrator.spawner import _AWAIT_APPROVAL_REASON
 
 _FAILED_STATUSES = (InstanceStatus.FAILED, InstanceStatus.KILLED)
@@ -62,7 +62,9 @@ def get_kanban(db: Session = Depends(db_session)) -> KanbanBoard:
         .where(Instance.status.in_(_FAILED_STATUSES))
     ))
 
-    # Tasks in BLOCKED state whose last transition reason is the awaiting-approval sentinel.
+    # Tasks blocked pending a human decision: the typed column replaces the
+    # legacy last-transition-reason join. Legacy rows (blocked before
+    # migration 010 with reason=_AWAIT_APPROVAL_REASON) are still caught.
     latest_transition_subq = (
         select(TaskTransition.task_id, sqlfunc.max(TaskTransition.transitioned_at).label("latest"))
         .group_by(TaskTransition.task_id)
@@ -93,7 +95,12 @@ def get_kanban(db: Session = Depends(db_session)) -> KanbanBoard:
             current_instance_id=inst.id if inst else None,
             current_role_name=role_name,
             last_instance_failed=t.id in failed_task_ids,
-            awaiting_approval=t.id in awaiting_approval_task_ids,
+            awaiting_approval=(
+                t.blocked_reason == BlockedReason.MANUAL_INTERVENTION
+                or t.id in awaiting_approval_task_ids
+            ),
+            blocked_reason=t.blocked_reason.value if t.blocked_reason else None,
+            bounce_count=t.bounce_count or 0,
             created_at=t.created_at,
         )
 

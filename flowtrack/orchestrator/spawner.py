@@ -36,7 +36,7 @@ from flowtrack.models import Instance, InstanceEvent, Job, Role, Task, TaskComme
 from flowtrack.models.instance import InstanceStatus
 from flowtrack.models.instance_event import InstanceEventType
 from flowtrack.models.job import JobStatus
-from flowtrack.models.task import TaskStatus
+from flowtrack.models.task import BlockedReason, TaskStatus
 from flowtrack.integrations.jira_sync import push_task_status
 from flowtrack.orchestrator import hooks, locks, worktree
 from flowtrack.orchestrator.queue import release_job
@@ -145,7 +145,7 @@ async def _supervise_inner(job_id: UUID, instance_id: UUID) -> None:
 
     # 5. Spawn subprocess.
     cmd = _build_command(ctx)
-    env = _build_env(instance_id=instance_id)
+    env = _build_env(instance_id=instance_id, role_name=ctx.role_name)
     log.info("spawning instance %s: %s", instance_id, " ".join(cmd))
     # 4MB stdout buffer — the first system/init line from real Claude Code
     # serialises every available tool + slash command + skill into a single
@@ -296,141 +296,202 @@ def _finalize(
 
 
 _REQUEST_CHANGES_REASON = "reviewer: REQUEST_CHANGES"
+# Legacy sentinel — the bounce cap replaced the approval-at-2nd-cycle rule, so
+# the spawner no longer writes this reason. The approve endpoint still accepts
+# it for tasks blocked before migration 010.
 _AWAIT_APPROVAL_REASON = "reviewer: REQUEST_CHANGES (awaiting approval)"
 
+# Verdict keyword -> outcome, per role. Per event, first keyword found wins,
+# so rejection keywords come before approval ones. Outcomes:
+#   failure — route via role.task_status_on_failure (bounce-capped)
+#   human   — blocked, blocked_reason=manual_intervention
+#   infra   — blocked, blocked_reason=infra_failure (DevOps pickup)
+#   success — fall through to the role's default success chain
+_ROLE_VERDICTS: dict[str, tuple[tuple[str, str], ...]] = {
+    "reviewer": (
+        ("REQUEST_CHANGES", "failure"),
+        ("NEEDS_HUMAN", "human"),
+        ("APPROVE", "success"),
+    ),
+    "qa": (
+        ("FAIL", "failure"),
+        ("BLOCKED", "infra"),
+        ("PASS", "success"),
+    ),
+}
 
-def _prior_request_changes_count(db: Session, task_id: UUID) -> int:
-    """Count how many times this task has already been sent back to dev by the reviewer."""
-    from sqlalchemy import func
-    return db.scalar(
-        select(func.count()).select_from(TaskTransition).where(
-            TaskTransition.task_id == task_id,
-            TaskTransition.reason == _REQUEST_CHANGES_REASON,
-        )
-    ) or 0
+# Which role works a task at a given status — used to enqueue the rework job
+# when a failure routes the task back to an earlier stage.
+_STATUS_ROLE: dict[TaskStatus, str] = {
+    TaskStatus.IN_PROGRESS: "dev",
+    TaskStatus.IN_REVIEW: "reviewer",
+    TaskStatus.IN_QA: "qa",
+}
 
 
-def _send_back_to_dev(
-    db: Session, *, task: Task, role: Role, instance_id: UUID
+def _block_task(
+    db: Session, *, task: Task, role: Role, instance_id: UUID,
+    reason: str, body: str, blocked_reason: BlockedReason,
+    event_type: str = "task_blocked", event_extra: dict | None = None,
 ) -> None:
-    """Reviewer rejected: route the task back to dev with the reviewer's
-    parent_branch so dev's next worktree sees what was reviewed.
+    """Task -> blocked with a typed blocked_reason, comment + WS events."""
+    from_status = task.status.value if task.status else None
+    task.status = TaskStatus.BLOCKED
+    task.blocked_reason = blocked_reason
+    push_task_status(task.ticket_id, task.status.value)
+    db.add(TaskTransition(
+        task_id=task.id, from_status=from_status, to_status=task.status.value,
+        instance_id=instance_id, reason=reason,
+    ))
+    db.add(TaskComment(
+        task_id=task.id, body=body,
+        author_role_id=role.id, instance_id=instance_id,
+    ))
+    broker.publish_sync(event_type, {
+        "task_id": str(task.id),
+        "from_role": role.name,
+        "instance_id": str(instance_id),
+        "blocked_reason": blocked_reason.value,
+        **(event_extra or {}),
+    })
+    broker.publish_sync("task_transitioned", {
+        "task_id": str(task.id), "from_status": from_status,
+        "to_status": task.status.value, "by_role": role.name,
+        "instance_id": str(instance_id),
+    })
 
-    On the first REQUEST_CHANGES the dev job is enqueued automatically.
-    On subsequent cycles the task is blocked and the frontend must confirm
-    before the job is created — see _await_approval_to_return_to_dev.
+
+def _rejection_feedback(
+    db: Session, *, instance_id: UUID, role_name: str, keyword: str
+) -> str:
+    """Format the rejecting instance's assistant text as rework context.
+
+    Injected into the next run's prompt via the job payload's resume_context
+    slot so the reworking agent sees WHAT was rejected and why, instead of
+    a bare "see prior task comments" pointer.
     """
-    prior_cycles = _prior_request_changes_count(db, task.id)
-    if prior_cycles >= 1:
-        _await_approval_to_return_to_dev(db, task=task, role=role, instance_id=instance_id)
+    events = list(db.scalars(
+        select(InstanceEvent)
+        .where(InstanceEvent.instance_id == instance_id)
+        .where(InstanceEvent.event_type.in_((
+            InstanceEventType.ASSISTANT,
+            InstanceEventType.MESSAGE,
+        )))
+        .order_by(InstanceEvent.id.asc())
+    ))
+    texts = [
+        t for t in (_flatten_text(ev.payload_json or {}).strip() for ev in events)
+        if len(t) > 30
+    ]
+    detail = "\n\n".join(texts[-4:])[-1500:] if texts else "(no detail captured — see task comments)"
+    return (
+        f"## Rework requested by {role_name} (verdict: {keyword})\n"
+        "The previous delivery was rejected. Address ALL the points below, "
+        "then finish the task.\n\n" + detail
+    )
+
+
+def _route_failure(
+    db: Session, *, task: Task, role: Role, instance_id: UUID, keyword: str
+) -> None:
+    """Config-driven failure routing with a persisted bounce cap.
+
+    Increments tasks.bounce_count (survives across process runs, unlike the
+    per-run max_turns budget). Over role.max_bounce_count the task is forced
+    to blocked/manual_intervention regardless of task_status_on_failure —
+    the human unblock path (approve-return-dev) resets the counter.
+    NULL task_status_on_failure keeps the legacy behaviour: blocked.
+    """
+    reason = f"{role.name}: {keyword}"
+    task.bounce_count = (task.bounce_count or 0) + 1
+    cap = role.max_bounce_count
+
+    if cap is not None and task.bounce_count > cap:
+        _block_task(
+            db, task=task, role=role, instance_id=instance_id,
+            reason=f"{reason} (bounce cap {cap} exceeded)",
+            body=(
+                f"{role.name} rejected this task {task.bounce_count} times "
+                f"(cap {cap}). Automatic rework disabled — human approval "
+                "required. Click 'Aprovar → Dev' on the kanban card to continue."
+            ),
+            blocked_reason=BlockedReason.MANUAL_INTERVENTION,
+            # Same event the old approval flow used — keeps the kanban toast.
+            event_type="reviewer_return_approval_needed",
+            event_extra={"task_title": task.title, "cycle": task.bounce_count},
+        )
+        return
+
+    dest: TaskStatus | None = None
+    if role.task_status_on_failure:
+        try:
+            dest = TaskStatus(role.task_status_on_failure)
+        except ValueError:
+            log.warning(
+                "role %s has invalid task_status_on_failure=%s — blocking task %s",
+                role.name, role.task_status_on_failure, task.id,
+            )
+
+    target_role_name = _STATUS_ROLE.get(dest) if dest else None
+    target_role = (
+        db.scalar(select(Role).where(Role.name == target_role_name))
+        if target_role_name else None
+    )
+    if dest is None or dest == TaskStatus.BLOCKED or target_role is None:
+        if dest is not None and dest != TaskStatus.BLOCKED and target_role is None:
+            log.warning(
+                "no role owns status %s (task_status_on_failure of %s) — blocking task %s",
+                dest.value, role.name, task.id,
+            )
+        _block_task(
+            db, task=task, role=role, instance_id=instance_id,
+            reason=reason,
+            body=f"{role.name} verdict {keyword} — no automatic rework route. Human triage required.",
+            blocked_reason=BlockedReason.MANUAL_INTERVENTION,
+        )
         return
 
     inst = db.get(Instance, instance_id)
-    dev_role = db.scalar(select(Role).where(Role.name == "dev"))
-    if dev_role is None:
-        log.warning("reviewer wants changes but no 'dev' role found — falling back to blocked")
-        _block_for_human(db, task=task, role=role, instance_id=instance_id)
-        return
-
     from_status = task.status.value if task.status else None
-    task.status = TaskStatus.IN_PROGRESS
-    push_task_status(task.ticket_id, task.status.value)
+    task.status = dest
+    task.blocked_reason = None
+    push_task_status(task.ticket_id, dest.value)
     db.add(TaskTransition(
-        task_id=task.id, from_status=from_status, to_status=task.status.value,
-        instance_id=instance_id, reason=_REQUEST_CHANGES_REASON,
+        task_id=task.id, from_status=from_status, to_status=dest.value,
+        instance_id=instance_id, reason=reason,
     ))
-    db.add(TaskComment(
-        task_id=task.id,
-        body="Reviewer requested changes. Sending back to dev. See instance events for the reviewer's comments.",
-        author_role_id=role.id, instance_id=instance_id,
-    ))
-    parent_branch = inst.branch_name if inst is not None else None
-    worker_id = inst.worker_id if inst is not None else None
-    db.add(Job(
-        task_id=task.id, role_id=dev_role.id, priority=50,
-        worker_id=worker_id,
-        payload_json={
-            "parent_branch": parent_branch,
-            "reviewer_feedback": "REQUEST_CHANGES — see prior task comments",
-        } if parent_branch else {
-            "reviewer_feedback": "REQUEST_CHANGES — see prior task comments",
-        },
-    ))
-    broker.publish_sync("reviewer_request_changes", {
-        "task_id": str(task.id),
-        "from_role": role.name,
-        "instance_id": str(instance_id),
-    })
-    broker.publish_sync("task_transitioned", {
-        "task_id": str(task.id), "from_status": from_status,
-        "to_status": task.status.value, "by_role": role.name,
-        "instance_id": str(instance_id),
-    })
-
-
-def _await_approval_to_return_to_dev(
-    db: Session, *, task: Task, role: Role, instance_id: UUID
-) -> None:
-    """Reviewer requested changes again (2nd+ cycle): block and ask human.
-
-    The task goes to BLOCKED with a distinct reason. The kanban frontend shows
-    an approval button; when clicked it calls POST /api/tasks/{id}/approve-return-dev
-    which enqueues the dev job and transitions back to IN_PROGRESS.
-    """
-    prior_cycles = _prior_request_changes_count(db, task.id)
-    from_status = task.status.value if task.status else None
-    task.status = TaskStatus.BLOCKED
-    push_task_status(task.ticket_id, task.status.value)
-    db.add(TaskTransition(
-        task_id=task.id, from_status=from_status, to_status=task.status.value,
-        instance_id=instance_id, reason=_AWAIT_APPROVAL_REASON,
-    ))
+    cap_note = f"/{cap}" if cap is not None else ""
     db.add(TaskComment(
         task_id=task.id,
         body=(
-            f"Reviewer requested changes (cycle {prior_cycles + 1}). "
-            "Automatic return to dev is disabled — human approval required. "
-            "Click 'Aprovar → Dev' on the kanban card to continue."
+            f"{role.name} verdict: {keyword}. Routing back to {dest.value} "
+            f"(bounce {task.bounce_count}{cap_note}). See instance events for details."
         ),
         author_role_id=role.id, instance_id=instance_id,
     ))
-    broker.publish_sync("reviewer_return_approval_needed", {
-        "task_id": str(task.id),
-        "task_title": task.title,
-        "instance_id": str(instance_id),
-        "cycle": prior_cycles + 1,
-    })
-    broker.publish_sync("task_transitioned", {
-        "task_id": str(task.id), "from_status": from_status,
-        "to_status": task.status.value, "by_role": role.name,
-        "instance_id": str(instance_id),
-    })
-
-
-def _block_for_human(
-    db: Session, *, task: Task, role: Role, instance_id: UUID
-) -> None:
-    """Reviewer punted: task -> blocked, comment + WS event for the kanban."""
-    from_status = task.status.value if task.status else None
-    task.status = TaskStatus.BLOCKED
-    push_task_status(task.ticket_id, task.status.value)
-    db.add(TaskTransition(
-        task_id=task.id, from_status=from_status, to_status=task.status.value,
-        instance_id=instance_id, reason="reviewer: NEEDS_HUMAN",
+    payload: dict = {
+        "resume_context": _rejection_feedback(
+            db, instance_id=instance_id, role_name=role.name, keyword=keyword,
+        ),
+    }
+    if inst is not None and inst.branch_name:
+        payload["parent_branch"] = inst.branch_name
+    db.add(Job(
+        task_id=task.id, role_id=target_role.id, priority=50,
+        worker_id=inst.worker_id if inst is not None else None,
+        payload_json=payload,
     ))
-    db.add(TaskComment(
-        task_id=task.id,
-        body="Reviewer flagged NEEDS_HUMAN. Pipeline halted — human triage required.",
-        author_role_id=role.id, instance_id=instance_id,
-    ))
-    broker.publish_sync("reviewer_needs_human", {
+    broker.publish_sync("role_failure_routed", {
         "task_id": str(task.id),
         "from_role": role.name,
+        "to_role": target_role.name,
+        "to_status": dest.value,
+        "bounce_count": task.bounce_count,
         "instance_id": str(instance_id),
     })
     broker.publish_sync("task_transitioned", {
         "task_id": str(task.id), "from_status": from_status,
-        "to_status": task.status.value, "by_role": role.name,
+        "to_status": dest.value, "by_role": role.name,
         "instance_id": str(instance_id),
     })
 
@@ -460,15 +521,18 @@ def _flatten_text(payload: dict) -> str:
     return " ".join(parts)
 
 
-def _reviewer_verdict(db: Session, instance_id: UUID) -> str:
-    """Inspect recent assistant text for a verdict keyword.
+def _parse_verdict(
+    db: Session, instance_id: UUID, verdicts: tuple[tuple[str, str], ...]
+) -> tuple[str, str]:
+    """Inspect recent assistant text for one of the role's verdict keywords.
 
-    Searches the last ~20 assistant/result/message events for explicit
-    REQUEST_CHANGES / NEEDS_HUMAN / APPROVE. Earlier mentions win — the
-    reviewer prompt asks for the verdict at the end of its work.
+    Searches the last ~20 assistant/result/message events, newest first —
+    role prompts ask for the verdict at the end of their work. Per event,
+    keywords are checked in table order (rejections before approvals).
 
-    Default when nothing matches: 'needs_human' (fail-safe — the reviewer
-    said nothing actionable, escalate instead of waving through).
+    Returns (outcome, keyword). Default when nothing matches:
+    ('human', 'NO_VERDICT') — fail-safe: the agent said nothing actionable,
+    escalate instead of waving through.
     """
     rows = list(db.scalars(
         select(InstanceEvent)
@@ -483,13 +547,10 @@ def _reviewer_verdict(db: Session, instance_id: UUID) -> str:
     ))
     for ev in rows:
         text = _flatten_text(ev.payload_json or {}).upper()
-        if "REQUEST_CHANGES" in text:
-            return "request_changes"
-        if "NEEDS_HUMAN" in text:
-            return "needs_human"
-        if "APPROVE" in text:
-            return "approve"
-    return "needs_human"
+        for keyword, outcome in verdicts:
+            if keyword in text:
+                return outcome, keyword
+    return "human", "NO_VERDICT"
 
 
 def _advance_pipeline(
@@ -501,26 +562,49 @@ def _advance_pipeline(
     a missing role, logs and stops — does NOT raise (we already committed the
     instance as completed; the chain is best-effort from here).
 
-    Reviewer role is special: its verdict overrides the default chain — see
-    _reviewer_verdict.
+    Verdict-bearing roles (see _ROLE_VERDICTS) can override the default chain:
+    their failure/human/infra outcomes divert via _route_failure/_block_task;
+    only a success verdict falls through to the success path below.
     """
     role = db.get(Role, role_id)
     task = db.get(Task, task_id)
     if role is None or task is None:
         return
 
-    # Reviewer branching: override the default in_qa flow based on what the
-    # reviewer wrote. APPROVE keeps the default; the other branches divert.
-    if role.name == "reviewer":
-        verdict = _reviewer_verdict(db, instance_id)
-        log.info("reviewer verdict for task %s: %s", task.id, verdict)
-        if verdict == "request_changes":
-            _send_back_to_dev(db, task=task, role=role, instance_id=instance_id)
+    verdict_table = _ROLE_VERDICTS.get(role.name)
+    if verdict_table:
+        outcome, keyword = _parse_verdict(db, instance_id, verdict_table)
+        log.info("%s verdict for task %s: %s (%s)", role.name, task.id, outcome, keyword)
+        if outcome == "failure":
+            _route_failure(db, task=task, role=role, instance_id=instance_id, keyword=keyword)
             return
-        if verdict == "needs_human":
-            _block_for_human(db, task=task, role=role, instance_id=instance_id)
+        if outcome == "human":
+            _block_task(
+                db, task=task, role=role, instance_id=instance_id,
+                reason=f"{role.name}: {keyword}",
+                body=f"{role.name} flagged {keyword}. Pipeline halted — human triage required.",
+                blocked_reason=BlockedReason.MANUAL_INTERVENTION,
+            )
             return
-        # else: fall through to the default approve path below.
+        if outcome == "infra":
+            _block_task(
+                db, task=task, role=role, instance_id=instance_id,
+                reason=f"{role.name}: {keyword}",
+                body=(
+                    f"{role.name} reported {keyword}: environment/infra problem, "
+                    "not a code defect. Waiting for DevOps pickup."
+                ),
+                blocked_reason=BlockedReason.INFRA_FAILURE,
+            )
+            return
+        # else: success — fall through to the default chain below.
+
+    # Successful stage completion: stale block metadata no longer applies.
+    # bounce_count is deliberately NOT reset here — dev succeeding after each
+    # rework would zero it every cycle and the cap could never trigger. Only
+    # the human unblock path resets it.
+    if task.blocked_reason is not None:
+        task.blocked_reason = None
 
     if role.task_status_on_success:
         try:
@@ -858,8 +942,11 @@ def _build_prompt(ctx: _SpawnContext) -> str:
     return "\n".join(parts)
 
 
-def _build_env(*, instance_id: UUID) -> dict[str, str]:
+def _build_env(*, instance_id: UUID, role_name: str | None = None) -> dict[str, str]:
     env = dict(os.environ)
+    if role_name:
+        # Lets tooling (e.g. mock_claude in smokes) know which role is running.
+        env["FLOWTRACK_ROLE_NAME"] = role_name
     api_key = RuntimeConfig.get("anthropic_api_key")
     if api_key:
         env["ANTHROPIC_API_KEY"] = api_key

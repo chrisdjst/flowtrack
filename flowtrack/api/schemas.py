@@ -38,6 +38,8 @@ class TaskCard(_Base):
     current_role_name: str | None  # derived
     last_instance_failed: bool  # derived; true when last instance exited with failure
     awaiting_approval: bool  # derived; true when blocked awaiting human approval to return to dev
+    blocked_reason: str | None = None  # why the task is blocked (typed bucket)
+    bounce_count: int = 0  # failure-routings accumulated since last human reset
     created_at: datetime
 
 
@@ -145,6 +147,8 @@ class RoleCard(_Base):
     system_prompt: str
     next_role_name: str | None
     task_status_on_success: str | None
+    task_status_on_failure: str | None
+    max_bounce_count: int | None
     updated_at: datetime
 
 
@@ -157,3 +161,5 @@ class RoleUpdate(BaseModel):
     system_prompt: str | None = None
     next_role_name: str | None = None
     task_status_on_success: str | None = None
+    task_status_on_failure: str | None = None
+    max_bounce_count: int | None = None

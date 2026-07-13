@@ -86,10 +86,16 @@ def main() -> int:
     emit({"type": "tool_use", "tool": "Edit", "params": {"file_path": "noop.txt"}})
     emit({"type": "usage", "input_tokens": 800, "output_tokens": 300})
 
-    # Optional verdict marker — picked up by spawner._reviewer_verdict when
-    # the active role is 'reviewer'. Pipeline smokes set this env to drive
-    # APPROVE / REQUEST_CHANGES / NEEDS_HUMAN branches. Default APPROVE.
-    verdict = os.environ.get("FLOWTRACK_CLAUDE_MOCK_VERDICT", "APPROVE").upper()
+    # Optional verdict marker — picked up by spawner._parse_verdict for
+    # verdict-bearing roles. Smokes drive branches via env:
+    # FLOWTRACK_CLAUDE_MOCK_VERDICT_<ROLE> (e.g. _QA=FAIL) wins over the global
+    # FLOWTRACK_CLAUDE_MOCK_VERDICT. Default "APPROVE PASS" satisfies both the
+    # reviewer and qa keyword tables so verdict-agnostic smokes chain to done.
+    role = os.environ.get("FLOWTRACK_ROLE_NAME", "").upper()
+    verdict = os.environ.get(
+        f"FLOWTRACK_CLAUDE_MOCK_VERDICT_{role}",
+        os.environ.get("FLOWTRACK_CLAUDE_MOCK_VERDICT", "APPROVE PASS"),
+    ).upper()
     emit({
         "type": "message", "role": "assistant",
         "content": f"Verdict: {verdict}",
