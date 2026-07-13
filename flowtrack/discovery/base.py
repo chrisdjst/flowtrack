@@ -29,6 +29,10 @@ class DiscoveryCandidate:
     summary: str | None = None
     raw_payload: dict | None = None
     signal_score: float | None = None
+    # Critical findings bypass the human/TPM gate: the manager immediately
+    # promotes them to a Task and blocks it with blocked_reason=security.
+    # The source decides what counts as critical, the manager stays generic.
+    critical: bool = False
 
 
 @runtime_checkable

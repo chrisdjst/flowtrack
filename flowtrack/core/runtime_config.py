@@ -126,6 +126,19 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
         "type": "int", "default": 2, "group": "devops", "sensitive": False,
         "description": "Maximum infra-blocked tasks the DevOps agent picks up per sweep.",
     },
+    # ---------- secops ----------
+    "secops_scan_enabled": {
+        "type": "bool", "default": False, "group": "secops", "sensitive": False,
+        "description": "Run the SecOps scan (secrets + dependency vulns) as a discovery source. Needs daemon restart.",
+    },
+    "secops_scan_interval_seconds": {
+        "type": "int", "default": 21600, "group": "secops", "sensitive": False,
+        "description": "Seconds between SecOps scans (default 6h).",
+    },
+    "secops_max_findings": {
+        "type": "int", "default": 20, "group": "secops", "sensitive": False,
+        "description": "Maximum findings emitted per scan, worst severity first.",
+    },
     # ---------- discovery ----------
     "github_discovery_label": {
         "type": "str", "default": "bot-pickup", "group": "discovery", "sensitive": False,

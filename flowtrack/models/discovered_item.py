@@ -15,6 +15,7 @@ class DiscoverySource(str, enum.Enum):
     GITHUB_ISSUE = "github_issue"
     PR_COMMENT = "pr_comment"
     LOG_PATTERN = "log_pattern"
+    SECOPS = "secops"
 
 
 class DiscoveryKind(str, enum.Enum):
@@ -23,6 +24,7 @@ class DiscoveryKind(str, enum.Enum):
     IMPROVEMENT = "improvement"
     TECH_DEBT = "tech_debt"
     INCIDENT = "incident"
+    SECURITY = "security"
 
 
 class DiscoveryStatus(str, enum.Enum):

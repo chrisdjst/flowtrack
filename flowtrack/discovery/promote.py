@@ -17,9 +17,15 @@ from uuid import UUID
 from sqlalchemy import String, select
 from sqlalchemy.orm import Session
 
-from flowtrack.models import DiscoveredItem, Task
+from flowtrack.models import DiscoveredItem, Task, TaskComment, TaskTransition
 from flowtrack.models.discovered_item import DiscoveryStatus
-from flowtrack.models.task import PipelineRouting, TaskPriority, TaskSeverity, TaskStatus
+from flowtrack.models.task import (
+    BlockedReason,
+    PipelineRouting,
+    TaskPriority,
+    TaskSeverity,
+    TaskStatus,
+)
 
 log = logging.getLogger(__name__)
 
@@ -84,6 +90,40 @@ def promote_item(
     item.status = DiscoveryStatus.PROMOTED
     item.promoted_task_id = task.id
     log.info("promoted item %s -> task %s", item.id, task.id)
+    return task
+
+
+def escalate_critical_item(db: Session, item: DiscoveredItem) -> Task:
+    """CRITICAL security finding: promote AND block in one step.
+
+    Bypasses the TPM/human gate — a critical finding must be a visible,
+    blocking task now, not an inbox row. The task lands in blocked/security
+    at P0/urgent; a human triages and moves it into the pipeline (the human
+    unblock paths already reset bounce/blocked metadata).
+
+    Caller commits and publishes events (manager pattern).
+    """
+    task = promote_item(
+        db, item,
+        severity="P0-Critical",
+        task_spec=item.summary,
+    )
+    from_status = task.status.value
+    task.status = TaskStatus.BLOCKED
+    task.blocked_reason = BlockedReason.SECURITY
+    db.add(TaskTransition(
+        task_id=task.id, from_status=from_status, to_status=TaskStatus.BLOCKED.value,
+        reason="secops: CRITICAL finding",
+    ))
+    db.add(TaskComment(
+        task_id=task.id,
+        body=(
+            "SecOps scan reported a CRITICAL finding — auto-promoted and "
+            "blocked for immediate human triage.\n\n"
+            f"{item.summary or item.title}"
+        ),
+    ))
+    log.warning("secops: CRITICAL item %s escalated to blocked task %s", item.id, task.id)
     return task
 
 

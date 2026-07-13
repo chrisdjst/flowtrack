@@ -23,12 +23,14 @@ from flowtrack.core.settings import settings
 from flowtrack.discovery.base import DiscoveryCandidate, DiscoveryWorker
 from flowtrack.discovery.promote import (
     duplicate_item,
+    escalate_critical_item,
     open_tasks_snapshot,
     promote_item,
     reject_item,
 )
 from flowtrack.discovery.sources.github_issues import GitHubIssuesSource
 from flowtrack.discovery.sources.jira_backlog import JiraBacklogSource
+from flowtrack.discovery.sources.secops_scan import SecOpsScanSource
 from flowtrack.discovery.sources.sentry import SentryIssuesSource
 from flowtrack.models import DiscoveredItem
 
@@ -48,6 +50,10 @@ def default_sources() -> list[DiscoveryWorker]:
         sources.append(GitHubIssuesSource())
     if settings.sentry_token and settings.sentry_org and settings.sentry_project:
         sources.append(SentryIssuesSource())
+    # Gate evaluated at startup, like the cred checks above — flipping the
+    # config at runtime needs a daemon restart.
+    if RuntimeConfig.get("secops_scan_enabled"):
+        sources.append(SecOpsScanSource())
     return sources
 
 
@@ -87,7 +93,8 @@ async def run_discovery_manager(stop: asyncio.Event) -> None:
 
 
 def _run_source(source: DiscoveryWorker) -> list[UUID]:
-    """Persist new candidates. Returns IDs of rows actually inserted."""
+    """Persist new candidates. Returns IDs of rows actually inserted,
+    minus critical ones (already escalated — nothing left to refine)."""
     candidates: list[DiscoveryCandidate] = source.fetch()
     if not candidates:
         return []
@@ -116,14 +123,31 @@ def _run_source(source: DiscoveryWorker) -> list[UUID]:
                         DiscoveredItem.source_ref == c.source_ref,
                     )
                 )
-                if fresh:
-                    new_ids.append(fresh.id)
                 broker.publish_sync("discovered_item_added", {
                     "source": c.source.value,
                     "source_ref": c.source_ref,
                     "kind": c.kind.value,
                     "title": c.title,
                 })
+                if fresh is None:
+                    continue
+                if c.critical:
+                    # Critical security finding: promoted + blocked in the
+                    # same transaction, never queued for TPM refinement.
+                    task = escalate_critical_item(db, fresh)
+                    broker.publish_sync("secops_critical_blocked", {
+                        "item_id": str(fresh.id),
+                        "task_id": str(task.id),
+                        "title": task.title,
+                        "blocked_reason": "security",
+                    })
+                    broker.publish_sync("task_transitioned", {
+                        "task_id": str(task.id), "from_status": "todo",
+                        "to_status": "blocked", "by_role": "secops",
+                        "instance_id": None,
+                    })
+                else:
+                    new_ids.append(fresh.id)
         db.commit()
     except Exception:
         db.rollback()
