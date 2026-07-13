@@ -100,6 +100,19 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
         "type": "str", "default": "", "group": "integrations", "sensitive": False,
         "description": "Jira project key where tasks are created (e.g. KAN).",
     },
+    # ---------- po ----------
+    "po_auto_admit": {
+        "type": "bool", "default": False, "group": "po", "sensitive": False,
+        "description": "PO agent automatically enqueues dev jobs for ready tasks in priority order.",
+    },
+    "po_admission_interval_seconds": {
+        "type": "int", "default": 30, "group": "po", "sensitive": False,
+        "description": "Seconds between PO admission sweeps (when po_auto_admit is on).",
+    },
+    "po_admission_batch": {
+        "type": "int", "default": 3, "group": "po", "sensitive": False,
+        "description": "Maximum ready tasks the PO admits per sweep.",
+    },
     # ---------- discovery ----------
     "github_discovery_label": {
         "type": "str", "default": "bot-pickup", "group": "discovery", "sensitive": False,

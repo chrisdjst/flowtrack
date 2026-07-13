@@ -9,6 +9,7 @@ from flowtrack.cli.deploy import app as deploy_app
 from flowtrack.cli.dev import app as dev_app
 from flowtrack.cli.incident import app as incident_app
 from flowtrack.cli.interrupt import app as interrupt_app
+from flowtrack.cli.po import app as po_app
 from flowtrack.cli.report import app as report_app
 from flowtrack.cli.review import app as review_app
 from flowtrack.cli.status import app as status_app
@@ -32,6 +33,7 @@ app.add_typer(status_app, name="status")
 app.add_typer(log_app, name="log")
 app.add_typer(task_app, name="task")
 app.add_typer(discovery_app, name="discovery")
+app.add_typer(po_app, name="po")
 
 @app.callback()
 def _bootstrap() -> None:
