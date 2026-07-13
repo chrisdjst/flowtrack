@@ -62,6 +62,9 @@ class RankedTask:
     title: str
     score: int
     factors: dict[str, int]
+    # Which role admission should enqueue: "design" for pipeline_routing=
+    # design_dev tasks that don't have a ui_spec yet, "dev" otherwise.
+    entry_role: str = "dev"
 
 
 def score_task(task: Task, *, now: datetime | None = None) -> tuple[int, dict[str, int]]:
@@ -116,12 +119,20 @@ def rank_ready_tasks(db: Session, *, now: datetime | None = None) -> list[Ranked
         .order_by(Task.created_at.asc())
     )
 
+    from flowtrack.models.task import PipelineRouting
+
     ranked: list[RankedTask] = []
     for t in candidates:
         if t.id in skip:
             continue
         score, factors = score_task(t, now=now)
-        ranked.append(RankedTask(task_id=t.id, title=t.title, score=score, factors=factors))
+        needs_design = (
+            t.pipeline_routing == PipelineRouting.DESIGN_DEV and t.ui_spec is None
+        )
+        ranked.append(RankedTask(
+            task_id=t.id, title=t.title, score=score, factors=factors,
+            entry_role="design" if needs_design else "dev",
+        ))
     ranked.sort(key=lambda r: r.score, reverse=True)  # stable: ties stay oldest-first
     return ranked
 
@@ -137,24 +148,30 @@ def admit_ready_tasks(
     """
     if limit <= 0:
         return []
-    dev_role = db.scalar(select(Role).where(Role.name == "dev"))
-    if dev_role is None:
+    role_ids = {
+        r.name: r.id
+        for r in db.scalars(select(Role).where(Role.name.in_(("dev", "design"))))
+    }
+    if "dev" not in role_ids:
         log.warning("po admission: no 'dev' role found — nothing admitted")
         return []
 
     admitted = rank_ready_tasks(db)[:limit]
     for idx, ranked in enumerate(admitted):
+        # design_dev tasks enter at the design stage; if the design role is
+        # missing, degrade to dev rather than stranding the task.
+        role_id = role_ids.get(ranked.entry_role) or role_ids["dev"]
         db.add(Job(
             task_id=ranked.task_id,
-            role_id=dev_role.id,
+            role_id=role_id,
             priority=ADMISSION_BASE_PRIORITY + idx,
             worker_id=worker_id,
             payload_json={"admitted_by": "po", "score": ranked.score},
         ))
         log.info(
-            "po admission: task %s (%r) score=%d -> dev job (priority=%d)",
+            "po admission: task %s (%r) score=%d -> %s job (priority=%d)",
             ranked.task_id, ranked.title[:40], ranked.score,
-            ADMISSION_BASE_PRIORITY + idx,
+            ranked.entry_role, ADMISSION_BASE_PRIORITY + idx,
         )
     return admitted
 

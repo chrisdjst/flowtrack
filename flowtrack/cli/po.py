@@ -25,11 +25,15 @@ def rank() -> None:
         table.add_column("ID")
         table.add_column("Title", max_width=44)
         table.add_column("Score", justify="right")
+        table.add_column("Entry")
         table.add_column("Factors")
 
         for idx, r in enumerate(ranked, start=1):
             factors = " ".join(f"{k}={v}" for k, v in r.factors.items() if v)
-            table.add_row(str(idx), str(r.task_id)[:8], r.title, str(r.score), factors or "-")
+            table.add_row(
+                str(idx), str(r.task_id)[:8], r.title, str(r.score),
+                r.entry_role, factors or "-",
+            )
 
     if not ranked:
         console.print("[dim]No ready tasks (todo + acceptance criteria, not already queued).[/dim]")

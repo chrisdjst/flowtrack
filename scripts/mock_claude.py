@@ -91,11 +91,13 @@ def main() -> int:
     # FLOWTRACK_CLAUDE_MOCK_VERDICT_<ROLE> (e.g. _QA=FAIL) wins over the global
     # FLOWTRACK_CLAUDE_MOCK_VERDICT. Default "APPROVE PASS" satisfies both the
     # reviewer and qa keyword tables so verdict-agnostic smokes chain to done.
+    # Emit verbatim — spawner._parse_verdict uppercases the text itself, and
+    # design's UI spec payload must survive with its original casing.
     role = os.environ.get("FLOWTRACK_ROLE_NAME", "").upper()
     verdict = os.environ.get(
         f"FLOWTRACK_CLAUDE_MOCK_VERDICT_{role}",
         os.environ.get("FLOWTRACK_CLAUDE_MOCK_VERDICT", "APPROVE PASS"),
-    ).upper()
+    )
     emit({
         "type": "message", "role": "assistant",
         "content": f"Verdict: {verdict}",

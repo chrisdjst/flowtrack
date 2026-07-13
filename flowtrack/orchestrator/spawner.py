@@ -65,6 +65,10 @@ class _SpawnContext:
     task_ticket_id: str | None
     task_acceptance_criteria: str | None
     task_module_hint: str | None
+    # TPM's full spec and (when the design stage ran) the Design agent's UI
+    # spec — every downstream role gets both in its prompt.
+    task_spec: str | None
+    task_ui_spec: str | None
     branch_name: str
     # Branch to fork the worktree from. "HEAD" for the first role; for chained
     # roles (reviewer, qa), the previous role's branch so the new agent sees
@@ -224,6 +228,8 @@ def _load_context(instance_id: UUID, job_id: UUID) -> _SpawnContext | None:
             task_ticket_id=task.ticket_id,
             task_acceptance_criteria=task.acceptance_criteria,
             task_module_hint=task.module_hint,
+            task_spec=task.task_spec,
+            task_ui_spec=task.ui_spec,
             branch_name=f"auto/{role.name}-{short}-{ishort}",
             base_branch=parent_branch or "HEAD",
             resume_context=payload.get("resume_context"),
@@ -521,6 +527,52 @@ def _flatten_text(payload: dict) -> str:
     return " ".join(parts)
 
 
+_UI_SPEC_START = "UI_SPEC_START"
+_UI_SPEC_END = "UI_SPEC_END"
+
+
+def _capture_design_output(db: Session, *, instance_id: UUID, task: Task) -> str:
+    """Store the design instance's UI spec on the task, honouring SKIP.
+
+    Returns "skip" | "created" | "empty". The design prompt is asked to emit
+    either the single keyword SKIP (no UI work needed) or the spec between
+    UI_SPEC_START/UI_SPEC_END markers; without markers we fall back to the
+    last substantial assistant text so a slightly off-format run still
+    delivers something reviewable.
+    """
+    events = list(db.scalars(
+        select(InstanceEvent)
+        .where(InstanceEvent.instance_id == instance_id)
+        .where(InstanceEvent.event_type.in_((
+            InstanceEventType.ASSISTANT,
+            InstanceEventType.MESSAGE,
+        )))
+        .order_by(InstanceEvent.id.asc())
+    ))
+    texts = [
+        t for t in (_flatten_text(ev.payload_json or {}).strip() for ev in events)
+        if t
+    ]
+    joined = "\n\n".join(texts)
+
+    if "SKIP" in joined.upper() and _UI_SPEC_START not in joined:
+        return "skip"
+
+    start = joined.find(_UI_SPEC_START)
+    end = joined.rfind(_UI_SPEC_END)
+    if start >= 0 and end > start:
+        spec = joined[start + len(_UI_SPEC_START):end].strip()
+    else:
+        # Fallback: last text block long enough to plausibly be a spec.
+        substantial = [t for t in texts if len(t) > 80]
+        spec = substantial[-1].strip() if substantial else ""
+
+    if not spec:
+        return "empty"
+    task.ui_spec = spec
+    return "created"
+
+
 def _parse_verdict(
     db: Session, instance_id: UUID, verdicts: tuple[tuple[str, str], ...]
 ) -> tuple[str, str]:
@@ -570,6 +622,25 @@ def _advance_pipeline(
     task = db.get(Task, task_id)
     if role is None or task is None:
         return
+
+    # Design stage: capture the UI spec (or honour SKIP) before the normal
+    # success chain advances the task to dev. Design has no failure verdicts —
+    # a crashed instance never reaches here (only COMPLETED instances do).
+    if role.name == "design":
+        outcome = _capture_design_output(db, instance_id=instance_id, task=task)
+        log.info("design outcome for task %s: %s", task.id, outcome)
+        db.add(TaskComment(
+            task_id=task.id,
+            body=(
+                "Design: SKIP — no UI work needed; proceeding straight to dev."
+                if outcome == "skip" else
+                "Design: UI spec delivered (stored on the task)."
+                if outcome == "created" else
+                "Design: no usable output captured — proceeding to dev without a UI spec."
+            ),
+            author_role_id=role.id, instance_id=instance_id,
+        ))
+        # fall through: the seeded chain (design -> dev) advances either way.
 
     verdict_table = _ROLE_VERDICTS.get(role.name)
     if verdict_table:
@@ -933,6 +1004,10 @@ def _build_prompt(ctx: _SpawnContext) -> str:
         parts += ["", "## Description", ctx.task_description]
     if ctx.task_acceptance_criteria:
         parts += ["", "## Acceptance criteria", ctx.task_acceptance_criteria]
+    if ctx.task_spec:
+        parts += ["", "## Task spec", ctx.task_spec]
+    if ctx.task_ui_spec:
+        parts += ["", "## UI spec", ctx.task_ui_spec]
     if ctx.task_module_hint:
         parts += ["", "## Module scope",
                   f"You may only edit files under: `{ctx.task_module_hint}`."]
