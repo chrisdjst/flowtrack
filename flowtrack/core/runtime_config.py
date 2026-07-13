@@ -126,6 +126,31 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
         "type": "int", "default": 2, "group": "devops", "sensitive": False,
         "description": "Maximum infra-blocked tasks the DevOps agent picks up per sweep.",
     },
+    # ---------- merge & deploy ----------
+    "merge_enabled": {
+        "type": "bool", "default": False, "group": "merge", "sensitive": False,
+        "description": "After QA passes, merge the task branch into merge_target_branch (builtin executor, no LLM).",
+    },
+    "merge_target_branch": {
+        "type": "str", "default": "main", "group": "merge", "sensitive": False,
+        "description": "Branch the merge stage fast-forwards/merges task branches into.",
+    },
+    "deploy_command": {
+        "type": "str", "default": "", "group": "merge", "sensitive": False,
+        "description": (
+            "Shell command run in the target repo after a successful merge. Empty = merge-only. "
+            "WARNING: runs arbitrary shell as the daemon user — anyone who can edit settings can "
+            "execute commands; keep api_token set (or pin this key via env)."
+        ),
+    },
+    "deploy_environment": {
+        "type": "str", "default": "development", "group": "merge", "sensitive": False,
+        "description": "Environment recorded on the DORA deployment row (production|staging|development).",
+    },
+    "deploy_timeout_seconds": {
+        "type": "int", "default": 300, "group": "merge", "sensitive": False,
+        "description": "Seconds the deploy_command may run before the stage fails as infra_failure.",
+    },
     # ---------- secops ----------
     "secops_scan_enabled": {
         "type": "bool", "default": False, "group": "secops", "sensitive": False,

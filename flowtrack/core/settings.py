@@ -41,6 +41,17 @@ class Settings(BaseSettings):
     budget_hour_cap_usd: float = 0.0
     budget_day_cap_usd: float = 0.0
 
+    # ----- Merge & deploy stage (KAN-40) -----
+    # In pydantic (unlike po_*/devops_*) so subprocess smokes can flip them
+    # per-run via env without touching the shared DB config.
+    merge_enabled: bool = False
+    merge_target_branch: str = "main"
+    # Shell command run in the target repo after a successful merge.
+    # Empty = merge-only (still recorded as a deployment for DORA).
+    deploy_command: str = ""
+    deploy_environment: str = "development"
+    deploy_timeout_seconds: int = 300
+
     # Discovery: JQL label tag for Jira backlog discovery source.
     jira_discovery_label: str = "auto"
     # Discovery: GitHub issue label that opts an issue into auto-discovery.

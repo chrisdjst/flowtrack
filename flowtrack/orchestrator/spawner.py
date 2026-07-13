@@ -38,7 +38,7 @@ from flowtrack.models.instance_event import InstanceEventType
 from flowtrack.models.job import JobStatus
 from flowtrack.models.task import BlockedReason, TaskStatus
 from flowtrack.integrations.jira_sync import push_task_status
-from flowtrack.orchestrator import hooks, locks, worktree
+from flowtrack.orchestrator import hooks, locks, merger, worktree
 from flowtrack.orchestrator.queue import release_job
 from flowtrack.orchestrator.stream_parser import consume_stream
 
@@ -96,6 +96,12 @@ async def _supervise_inner(job_id: UUID, instance_id: UUID) -> None:
     ctx = await asyncio.to_thread(_load_context, instance_id, job_id)
     if ctx is None:
         log.error("supervisor: instance/job/role/task missing for %s", instance_id)
+        return
+
+    # 1b. Builtin merge stage (KAN-40): deterministic executor, no Claude
+    # spawn, no worktree/locks here — the merger manages its own temp worktree.
+    if ctx.role_name == merger.MERGE_ROLE_NAME:
+        await merger.run_merge(job_id, instance_id)
         return
 
     # 2. Worktree.
@@ -683,6 +689,45 @@ def _advance_pipeline(
     # the human unblock path resets it.
     if task.blocked_reason is not None:
         task.blocked_reason = None
+
+    # Merge & deploy stage (KAN-40): opt-in diversion of qa's success chain.
+    # Gated in code (not seeded on the role row) so merge_enabled=false keeps
+    # the default qa -> done behaviour byte-for-byte. The task stays in_qa
+    # while the builtin merge executor runs; it flips to done (or a failure
+    # bucket) there.
+    if role.name == "qa" and RuntimeConfig.get("merge_enabled"):
+        merge_role = db.scalar(select(Role).where(Role.name == merger.MERGE_ROLE_NAME))
+        if merge_role is not None:
+            inst = db.get(Instance, instance_id)
+            payload: dict = {}
+            if inst is not None and inst.branch_name:
+                payload["parent_branch"] = inst.branch_name
+            # Audit marker (in_qa -> in_qa): the status doesn't change while
+            # the merge runs, but the merger's gate requires proof that QA
+            # completed — this row is that proof (same same-status precedent
+            # as _block_task's blocked -> blocked).
+            db.add(TaskTransition(
+                task_id=task.id,
+                from_status=task.status.value if task.status else None,
+                to_status=task.status.value if task.status else None,
+                instance_id=instance_id, reason="pipeline: qa completed",
+            ))
+            db.add(Job(
+                task_id=task.id, role_id=merge_role.id, priority=100,
+                worker_id=inst.worker_id if inst is not None else None,
+                payload_json=payload,
+            ))
+            log.info("pipeline: qa -> merge enqueued for task %s (branch=%s)",
+                     task.id, payload.get("parent_branch"))
+            broker.publish_sync("job_enqueued", {
+                "task_id": str(task.id),
+                "role_name": merger.MERGE_ROLE_NAME,
+                "from_role": role.name,
+                "worker_id": inst.worker_id if inst is not None else None,
+                "parent_branch": payload.get("parent_branch"),
+            })
+            return
+        log.warning("merge_enabled but no 'merge' role exists — finishing chain normally")
 
     if role.task_status_on_success:
         try:
