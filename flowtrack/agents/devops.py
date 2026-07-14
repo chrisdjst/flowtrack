@@ -18,7 +18,7 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from flowtrack.models import Instance, Job, Role, Task, TaskTransition
+from flowtrack.models import Instance, Job, Task, TaskTransition
 from flowtrack.models.instance import InstanceStatus
 from flowtrack.models.job import JobStatus
 from flowtrack.models.task import BlockedReason, TaskStatus
@@ -70,8 +70,9 @@ def pickup_infra_failures(
     """
     if limit <= 0:
         return []
-    devops_role = db.scalar(select(Role).where(Role.name == "devops"))
-    if devops_role is None:
+    from flowtrack.orchestrator.dispatch import resolve_role
+
+    if resolve_role(db, "devops") is None:
         log.warning("devops pickup: no 'devops' role found — nothing picked up")
         return []
 
@@ -94,6 +95,8 @@ def pickup_infra_failures(
     for task in candidates:
         if task.id in skip:
             continue
+        # Per-task: dispatch may pick a specialized devops variant.
+        devops_role = resolve_role(db, "devops", task=task)
         db.add(Job(
             task_id=task.id,
             role_id=devops_role.id,

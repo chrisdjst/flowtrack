@@ -47,6 +47,7 @@ from flowtrack.models.deployment import Environment
 from flowtrack.models.instance import InstanceStatus
 from flowtrack.models.job import JobStatus
 from flowtrack.models.task import BlockedReason, TaskStatus
+from flowtrack.orchestrator.pipeline_defs import stage_completed_reason
 from flowtrack.orchestrator.queue import release_job
 from flowtrack.orchestrator.worktree import _run_git
 
@@ -55,7 +56,8 @@ log = logging.getLogger(__name__)
 MERGE_ROLE_NAME = "merge"
 _CAS_ATTEMPTS = 3
 
-_GATE_REASONS = ("pipeline: reviewer completed", "pipeline: qa completed")
+# Review=APPROVE + QA=PASS, proven by their stage-completion transitions.
+_GATE_REASONS = (stage_completed_reason("reviewer"), stage_completed_reason("qa"))
 
 
 async def run_merge(job_id: UUID, instance_id: UUID) -> None:
@@ -319,7 +321,8 @@ def _finalize_success(
         task.blocked_reason = None
         db.add(TaskTransition(
             task_id=task.id, from_status=from_status, to_status=TaskStatus.DONE.value,
-            instance_id=instance_id, reason="pipeline: merge completed",
+            instance_id=instance_id,
+            reason=stage_completed_reason(MERGE_ROLE_NAME),
         ))
         db.add(TaskComment(
             task_id=task.id,

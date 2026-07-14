@@ -20,7 +20,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from flowtrack.models import Instance, Job, Role, Task
+from flowtrack.models import Instance, Job, Task
 from flowtrack.models.instance import InstanceStatus
 from flowtrack.models.job import JobStatus
 from flowtrack.models.task import TaskPriority
@@ -148,22 +148,25 @@ def admit_ready_tasks(
     """
     if limit <= 0:
         return []
-    role_ids = {
-        r.name: r.id
-        for r in db.scalars(select(Role).where(Role.name.in_(("dev", "design"))))
-    }
-    if "dev" not in role_ids:
+    from flowtrack.orchestrator.dispatch import resolve_role
+
+    if resolve_role(db, "dev") is None:
         log.warning("po admission: no 'dev' role found — nothing admitted")
         return []
 
     admitted = rank_ready_tasks(db)[:limit]
     for idx, ranked in enumerate(admitted):
+        task = db.get(Task, ranked.task_id)
         # design_dev tasks enter at the design stage; if the design role is
-        # missing, degrade to dev rather than stranding the task.
-        role_id = role_ids.get(ranked.entry_role) or role_ids["dev"]
+        # missing, degrade to dev rather than stranding the task. Dispatch
+        # picks the most specific variant for this task either way.
+        role = (
+            resolve_role(db, ranked.entry_role, task=task)
+            or resolve_role(db, "dev", task=task)
+        )
         db.add(Job(
             task_id=ranked.task_id,
-            role_id=role_id,
+            role_id=role.id,
             priority=ADMISSION_BASE_PRIORITY + idx,
             worker_id=worker_id,
             payload_json={"admitted_by": "po", "score": ranked.score},

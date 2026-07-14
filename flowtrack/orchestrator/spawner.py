@@ -40,6 +40,8 @@ from flowtrack.models.session import SessionType
 from flowtrack.models.task import BlockedReason, TaskStatus
 from flowtrack.integrations.jira_sync import push_task_status
 from flowtrack.orchestrator import hooks, locks, merger, worktree
+from flowtrack.orchestrator.dispatch import base_role_of, resolve_role
+from flowtrack.orchestrator.pipeline_defs import STATUS_ROLE, base_name, stage_completed_reason
 from flowtrack.orchestrator.queue import release_job
 from flowtrack.orchestrator.stream_parser import consume_stream
 
@@ -54,6 +56,9 @@ class _SpawnContext:
     SQLAlchemy DetachedInstanceError when default expire_on_commit is in play.
     """
     role_name: str
+    # Semantic identity: equals role_name for base roles, the base's name
+    # for specialization variants. Verdict/env/merge hooks key on this.
+    role_base_name: str
     role_system_prompt: str
     role_tools_allowed: list[str] | None
     role_max_minutes: int
@@ -101,7 +106,7 @@ async def _supervise_inner(job_id: UUID, instance_id: UUID) -> None:
 
     # 1b. Builtin merge stage (KAN-40): deterministic executor, no Claude
     # spawn, no worktree/locks here — the merger manages its own temp worktree.
-    if ctx.role_name == merger.MERGE_ROLE_NAME:
+    if ctx.role_base_name == merger.MERGE_ROLE_NAME:
         await merger.run_merge(job_id, instance_id)
         return
 
@@ -156,7 +161,7 @@ async def _supervise_inner(job_id: UUID, instance_id: UUID) -> None:
 
     # 5. Spawn subprocess.
     cmd = _build_command(ctx)
-    env = _build_env(instance_id=instance_id, role_name=ctx.role_name)
+    env = _build_env(instance_id=instance_id, role_name=ctx.role_base_name)
     log.info("spawning instance %s: %s", instance_id, " ".join(cmd))
     # 4MB stdout buffer — the first system/init line from real Claude Code
     # serialises every available tool + slash command + skill into a single
@@ -223,6 +228,7 @@ def _load_context(instance_id: UUID, job_id: UUID) -> _SpawnContext | None:
         parent_branch = payload.get("parent_branch")
         return _SpawnContext(
             role_name=role.name,
+            role_base_name=base_name(role),
             role_system_prompt=role.system_prompt,
             role_tools_allowed=list(role.tools_allowed) if role.tools_allowed else None,
             role_max_minutes=role.max_minutes,
@@ -284,7 +290,7 @@ def _mark_running(instance_id: UUID, *, wt_path: str, branch: str) -> None:
         role = db.get(Role, inst.role_id)
         task = db.get(Task, inst.task_id) if inst.task_id else None
         session = SessionRepository(db).create(
-            _ROLE_SESSION_TYPES.get(role.name if role else "", SessionType.DEVELOPMENT),
+            _ROLE_SESSION_TYPES.get(base_name(role) if role else "", SessionType.DEVELOPMENT),
             ticket_id=task.ticket_id if task is not None else None,
             instance_id=instance_id,
         )
@@ -374,13 +380,8 @@ _ROLE_VERDICTS: dict[str, tuple[tuple[str, str], ...]] = {
     ),
 }
 
-# Which role works a task at a given status — used to enqueue the rework job
-# when a failure routes the task back to an earlier stage.
-_STATUS_ROLE: dict[TaskStatus, str] = {
-    TaskStatus.IN_PROGRESS: "dev",
-    TaskStatus.IN_REVIEW: "reviewer",
-    TaskStatus.IN_QA: "qa",
-}
+# Status -> base role for rework routing now lives in pipeline_defs
+# (single source shared with the API routers).
 
 
 def _block_task(
@@ -464,7 +465,9 @@ def _route_failure(
     """
     reason = f"{role.name}: {keyword}"
     task.bounce_count = (task.bounce_count or 0) + 1
-    cap = role.max_bounce_count
+    # Variants inherit failure routing/cap from their base unless overridden.
+    chain = base_role_of(db, role)
+    cap = role.max_bounce_count if role.max_bounce_count is not None else chain.max_bounce_count
 
     if cap is not None and task.bounce_count > cap:
         _block_task(
@@ -482,19 +485,20 @@ def _route_failure(
         )
         return
 
+    status_on_failure = role.task_status_on_failure or chain.task_status_on_failure
     dest: TaskStatus | None = None
-    if role.task_status_on_failure:
+    if status_on_failure:
         try:
-            dest = TaskStatus(role.task_status_on_failure)
+            dest = TaskStatus(status_on_failure)
         except ValueError:
             log.warning(
                 "role %s has invalid task_status_on_failure=%s — blocking task %s",
-                role.name, role.task_status_on_failure, task.id,
+                role.name, status_on_failure, task.id,
             )
 
-    target_role_name = _STATUS_ROLE.get(dest) if dest else None
+    target_role_name = STATUS_ROLE.get(dest) if dest else None
     target_role = (
-        db.scalar(select(Role).where(Role.name == target_role_name))
+        resolve_role(db, target_role_name, task=task)
         if target_role_name else None
     )
     if dest is None or dest == TaskStatus.BLOCKED or target_role is None:
@@ -677,10 +681,16 @@ def _advance_pipeline(
     if role is None or task is None:
         return
 
+    # Variants inherit the chain shape they don't override from their base
+    # (a variant specializes the prompt, not the pipeline, by default).
+    chain = base_role_of(db, role)
+    next_role_name = role.next_role_name or chain.next_role_name
+    status_on_success = role.task_status_on_success or chain.task_status_on_success
+
     # Design stage: capture the UI spec (or honour SKIP) before the normal
     # success chain advances the task to dev. Design has no failure verdicts —
     # a crashed instance never reaches here (only COMPLETED instances do).
-    if role.name == "design":
+    if base_name(role) == "design":
         outcome = _capture_design_output(db, instance_id=instance_id, task=task)
         log.info("design outcome for task %s: %s", task.id, outcome)
         db.add(TaskComment(
@@ -696,7 +706,7 @@ def _advance_pipeline(
         ))
         # fall through: the seeded chain (design -> dev) advances either way.
 
-    verdict_table = _ROLE_VERDICTS.get(role.name)
+    verdict_table = _ROLE_VERDICTS.get(base_name(role))
     if verdict_table:
         outcome, keyword = _parse_verdict(db, instance_id, verdict_table)
         log.info("%s verdict for task %s: %s (%s)", role.name, task.id, outcome, keyword)
@@ -741,8 +751,8 @@ def _advance_pipeline(
     # the default qa -> done behaviour byte-for-byte. The task stays in_qa
     # while the builtin merge executor runs; it flips to done (or a failure
     # bucket) there.
-    if role.name == "qa" and RuntimeConfig.get("merge_enabled"):
-        merge_role = db.scalar(select(Role).where(Role.name == merger.MERGE_ROLE_NAME))
+    if base_name(role) == "qa" and RuntimeConfig.get("merge_enabled"):
+        merge_role = resolve_role(db, merger.MERGE_ROLE_NAME, task=task)
         if merge_role is not None:
             inst = db.get(Instance, instance_id)
             payload: dict = {}
@@ -756,7 +766,8 @@ def _advance_pipeline(
                 task_id=task.id,
                 from_status=task.status.value if task.status else None,
                 to_status=task.status.value if task.status else None,
-                instance_id=instance_id, reason="pipeline: qa completed",
+                instance_id=instance_id,
+                reason=stage_completed_reason(base_name(role)),
             ))
             db.add(Job(
                 task_id=task.id, role_id=merge_role.id, priority=100,
@@ -775,13 +786,13 @@ def _advance_pipeline(
             return
         log.warning("merge_enabled but no 'merge' role exists — finishing chain normally")
 
-    if role.task_status_on_success:
+    if status_on_success:
         try:
-            new_status = TaskStatus(role.task_status_on_success)
+            new_status = TaskStatus(status_on_success)
         except ValueError:
             log.warning(
                 "role %s has invalid task_status_on_success=%s — skipping transition",
-                role.name, role.task_status_on_success,
+                role.name, status_on_success,
             )
         else:
             from_status = task.status.value if task.status else None
@@ -792,7 +803,9 @@ def _advance_pipeline(
                 from_status=from_status,
                 to_status=new_status.value,
                 instance_id=instance_id,
-                reason=f"pipeline: {role.name} completed",
+                # Base name: the merge gate and devops RCA match on these
+                # strings, and a variant must satisfy them like its base.
+                reason=stage_completed_reason(base_name(role)),
             ))
             broker.publish_sync("task_transitioned", {
                 "task_id": str(task.id),
@@ -802,12 +815,12 @@ def _advance_pipeline(
                 "instance_id": str(instance_id),
             })
 
-    if role.next_role_name:
-        next_role = db.scalar(select(Role).where(Role.name == role.next_role_name))
+    if next_role_name:
+        next_role = resolve_role(db, next_role_name, task=task)
         if next_role is None:
             log.warning(
                 "role %s.next_role_name=%s not found — pipeline halted for task %s",
-                role.name, role.next_role_name, task.id,
+                role.name, next_role_name, task.id,
             )
             return
         # Propagate the just-finished instance's worker_id so the chained job

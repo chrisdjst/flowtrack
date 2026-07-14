@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import String, Text, func
+from sqlalchemy import ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -36,6 +36,23 @@ class Role(TimestampMixin, Base):
     # blocked (manual_intervention) regardless of task_status_on_failure.
     # NULL = no cap. Compared against tasks.bounce_count.
     max_bounce_count: Mapped[int | None] = mapped_column(default=None)
+    # ----- Specialization dispatch (KAN-42) -----
+    # NULL = this row is a base role. Set = this row is a variant of that
+    # base (e.g. name='dev-frontend', base_role_name='dev'). The dispatcher
+    # resolves a requested base name to the most specific eligible variant;
+    # pipeline semantics (verdicts, session type, chain hooks) always key on
+    # the base name.
+    base_role_name: Mapped[str | None] = mapped_column(String(50))
+    # Free label describing what the variant is specialized in ('frontend').
+    specialization: Mapped[str | None] = mapped_column(String(100))
+    # fnmatch globs tested against tasks.module_hint. Non-empty + no match
+    # = variant ineligible for that task; a match adds specificity.
+    match_patterns: Mapped[list[str] | None] = mapped_column(ARRAY(String(255)))
+    # Variant scoped to a project: eligible only for tasks of that project
+    # (match adds the most specificity). NULL = any project.
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id")
+    )
     updated_at: Mapped[datetime] = mapped_column(
         server_default=func.now(), onupdate=func.now()
     )

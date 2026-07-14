@@ -8,6 +8,7 @@ from flowtrack.models.incident import Incident
 from flowtrack.models.instance import Instance
 from flowtrack.models.instance_event import InstanceEvent
 from flowtrack.models.job import Job
+from flowtrack.models.project import Project
 from flowtrack.models.resource_lock import ResourceLock
 from flowtrack.models.role import Role
 from flowtrack.models.session import Session
@@ -26,6 +27,7 @@ __all__ = [
     "Instance",
     "InstanceEvent",
     "Job",
+    "Project",
     "ResourceLock",
     "Role",
     "Session",

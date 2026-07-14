@@ -74,6 +74,10 @@ class Task(TimestampMixin, Base):
     parent_task_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tasks.id")
     )
+    # Which project this task belongs to (specialization dispatch input).
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id")
+    )
     # Pipeline fields (migration 010).
     # Incremented when a role routes the task via task_status_on_failure.
     # NOT reset on success advances (dev succeeding after each rework would

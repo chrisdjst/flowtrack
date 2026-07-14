@@ -21,23 +21,16 @@ from flowtrack.models import Instance, InstanceEvent, Job, Role, Task, TaskComme
 from flowtrack.models.instance import InstanceStatus
 from flowtrack.models.instance_event import InstanceEventType
 from flowtrack.models.task import BlockedReason, TaskStatus
+from flowtrack.orchestrator.pipeline_defs import ROLE_STATUS, STATUS_ROLE, base_name
 from flowtrack.orchestrator.spawner import _AWAIT_APPROVAL_REASON, _REQUEST_CHANGES_REASON, _build_resume_context
 from flowtrack.services.incident_service import resolve_pipeline_incidents
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
 # Statuses that automatically trigger a role when a task is advanced to them.
+# Status <-> role maps live in pipeline_defs (single source, KAN-42).
 _STATUS_TO_AUTO_ROLE: dict[str, str] = {
-    "in_progress": "dev",
-    "in_review": "reviewer",
-    "in_qa": "qa",
-}
-
-# Reverse: role name → status to apply when that role is manually assigned.
-_ROLE_TO_STATUS: dict[str, TaskStatus] = {
-    "dev":      TaskStatus.IN_PROGRESS,
-    "reviewer": TaskStatus.IN_REVIEW,
-    "qa":       TaskStatus.IN_QA,
+    status.value: role for status, role in STATUS_ROLE.items()
 }
 
 _LIVE_STATUSES = (InstanceStatus.SPAWNING, InstanceStatus.RUNNING, InstanceStatus.WAITING_INPUT)
@@ -184,7 +177,8 @@ def assign_task(
         )
 
     # 1. Transition task status if the role has a canonical status mapping.
-    new_task_status = _ROLE_TO_STATUS.get(role.name)
+    # base_name: manually assigning a variant behaves like assigning its base.
+    new_task_status = ROLE_STATUS.get(base_name(role))
     from_status = task.status.value if task.status else None
     if new_task_status and task.status != new_task_status:
         task.status = new_task_status
@@ -284,7 +278,9 @@ def advance_task_status(
             .where(Instance.status.in_(_LIVE_STATUSES))
         ).first()
         if live is None:
-            role = db.scalar(select(Role).where(Role.name == auto_role_name))
+            from flowtrack.orchestrator.dispatch import resolve_role
+
+            role = resolve_role(db, auto_role_name, task=task)
             if role is not None:
                 job = Job(task_id=task.id, role_id=role.id, priority=100)
                 db.add(job)
@@ -344,7 +340,9 @@ def approve_return_to_dev(
                 detail="task is not awaiting human approval",
             )
 
-    dev_role = db.scalar(select(Role).where(Role.name == "dev"))
+    from flowtrack.orchestrator.dispatch import resolve_role
+
+    dev_role = resolve_role(db, "dev", task=task)
     if dev_role is None:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="'dev' role not found")
 
